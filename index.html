@@ -326,6 +326,7 @@
         this.scene = scene;
         this.name = name;
         this.controls = controls;
+        this.controller = new HumanController();
 
         this.state = new scene.RobotState(); // stores array, not a counter
 
@@ -410,33 +411,20 @@
       update(delta) {
         const scene = this.scene;
 
-        // Drive
-        let vx = 0, vy = 0;
-        if (!scene.matchOver) {
-          if (this.controls.left.isDown) vx -= ROBOT_SPEED;
-          if (this.controls.right.isDown) vx += ROBOT_SPEED;
-          if (this.controls.up.isDown) vy -= ROBOT_SPEED;
-          if (this.controls.down.isDown) vy += ROBOT_SPEED;
+        // Controller -> commands (Patch 1)
+        const cmd = this.controller.getCommands(scene, this, delta);
 
-          if (vx !== 0 && vy !== 0) {
-            const inv = 1 / Math.sqrt(2);
-            vx *= inv; vy *= inv;
-          }
-        }
-        scene.matter.body.setVelocity(this.body, {x: vx, y: vy});
+        // Apply drive
+        scene.matter.body.setVelocity(this.body, {x: cmd.vx, y: cmd.vy});
 
-        // Spin chassis
-        let omega = 0;
-        if (!scene.matchOver) {
-          if (this.controls.spinL.isDown) omega -= ROBOT_SPIN_SPEED;
-          if (this.controls.spinR.isDown) omega += ROBOT_SPIN_SPEED;
-        }
-        scene.matter.body.setAngularVelocity(this.body, omega);
+        // Apply spin
+        scene.matter.body.setAngularVelocity(this.body, cmd.omega);
 
-        // Shoot continuously while held
-        if (!scene.matchOver && this.controls.shootKey.isDown) {
+        // Apply shoot
+        if (!scene.matchOver && cmd.shoot) {
           scene.tryShoot(this);
         }
+
 
         // Attach intake in front
         const forwardAng = this.body.angle + FORWARD_OFFSET;
@@ -510,6 +498,10 @@
         this.label.x = rx;
         this.label.y = ry;
         this.label.rotation = 0;
+      }
+
+      setController(controller) {
+        this.controller = controller || new HumanController();
       }
     }
 
@@ -675,6 +667,111 @@
         this.glowG = null;
       }
     }
+
+
+    class BaseController {
+      /**
+       * Return desired commands for this frame.
+       * @returns {{ vx:number, vy:number, omega:number, shoot:boolean }}
+       */
+      getCommands(scene, robot, delta) {
+        return {vx: 0, vy: 0, omega: 0, shoot: false};
+      }
+    }
+
+    // -----------------------------
+    // HUMAN CONTROLLER (merges keyboard + gamepad)
+    // -----------------------------
+    class HumanController extends BaseController {
+      getCommands(scene, robot, delta) {
+        if (scene.matchOver) {
+          return {vx: 0, vy: 0, omega: 0, shoot: false};
+        }
+
+        // ---------- Keyboard digital (existing behavior) ----------
+        let kx = 0, ky = 0, kOmega = 0;
+
+        if (robot.controls.left.isDown) kx -= 1;
+        if (robot.controls.right.isDown) kx += 1;
+        if (robot.controls.up.isDown) ky -= 1;
+        if (robot.controls.down.isDown) ky += 1;
+
+        // normalize diagonal for keyboard
+        if (kx !== 0 && ky !== 0) {
+          const inv = 1 / Math.sqrt(2);
+          kx *= inv; ky *= inv;
+        }
+
+        if (robot.controls.spinL.isDown) kOmega -= 1;
+        if (robot.controls.spinR.isDown) kOmega += 1;
+
+        const kShoot = robot.controls.shootKey.isDown;
+
+        // Scale to your sim’s units
+        let vx = kx * ROBOT_SPEED;
+        let vy = ky * ROBOT_SPEED;
+        let omega = kOmega * ROBOT_SPIN_SPEED;
+        let shoot = kShoot;
+
+        // ---------- Gamepad (overrides drive if stick moved) ----------
+        const pad = scene.getGamepadForRobot(robot);
+        if (pad && pad.connected) {
+          const DEADZONE = 0.18;
+
+          // Left stick for drive (Phaser: axes[0]=LX, axes[1]=LY)
+          const ax = pad.axes.length > 0 ? pad.axes[0].getValue() : 0;
+          const ay = pad.axes.length > 1 ? pad.axes[1].getValue() : 0;
+
+          // D-pad as digital drive (optional, nice fallback)
+          const dpx = (pad.left ? -1 : 0) + (pad.right ? 1 : 0);
+          const dpy = (pad.up ? -1 : 0) + (pad.down ? 1 : 0);
+
+          // choose analog if outside deadzone, else d-pad, else keyboard
+          const mag = Math.hypot(ax, ay);
+          if (mag > DEADZONE) {
+            // normalize (optional) so full deflection is consistent
+            const nx = ax / mag;
+            const ny = ay / mag;
+
+            // Use magnitude for speed scaling, but clamp to [0..1]
+            const s = Math.min(1, mag);
+
+            vx = nx * (ROBOT_SPEED * s);
+            vy = ny * (ROBOT_SPEED * s);
+          } else if (dpx !== 0 || dpy !== 0) {
+            // normalize diagonal for dpad
+            let dx = dpx, dy = dpy;
+            if (dx !== 0 && dy !== 0) {
+              const inv = 1 / Math.sqrt(2);
+              dx *= inv; dy *= inv;
+            }
+            vx = dx * ROBOT_SPEED;
+            vy = dy * ROBOT_SPEED;
+          }
+
+          // Spin:  right stick
+          const rx = pad.axes.length > 2 ? pad.axes[2].getValue() : 0;
+
+          let pOmega = 0;
+          if (Math.abs(rx) > DEADZONE) pOmega = rx;
+
+          if (pOmega !== 0) {
+            omega = pOmega * ROBOT_SPIN_SPEED;
+          }
+
+          // Shoot: A / Cross is usually button 0
+          //const a = pad.buttons.length > 0 ? pad.buttons[0].pressed : false;
+          //shoot = shoot || a;
+
+          // Optional: also allow Right Trigger to shoot if you want
+          const rt = pad.buttons.length > 7 ? pad.buttons[7].value : 0; // may be 0..1
+          shoot = shoot || (rt > 0.5);
+        }
+
+        return {vx, vy, omega, shoot};
+      }
+    } // end of HumanController
+
 
     // -----------------------------
     // MAIN SCENE
@@ -1054,7 +1151,7 @@
             fuelObj.stash(robotObj.name);
             robotObj.state.fuelStore.push(fuelObj);
           }
-        });
+        });  // end of collision handler
 
         // Small HUD (optional)
         this.HUDtext = this.add.text(10, 10, "", {
@@ -1068,7 +1165,23 @@
         // Initialize time display
         this.setTimeUI(MATCH_TIME_S);
         this.applyTimeframeForElapsedS(0);
-      }
+
+        // Gamepad support
+        this.input.gamepad.start();
+
+        // Optional: log connections
+        this.input.gamepad.on("connected", (pad) => {
+          console.log("Gamepad connected:", pad.id, "index:", pad.index);
+        });
+        this.input.gamepad.on("disconnected", (pad) => {
+          console.log("Gamepad disconnected:", pad.id, "index:", pad.index);
+        });
+
+        // If you have 2 robots, assign pad indices (simple v1)
+        // Blue -> pad 0, Red -> pad 1 (change if you prefer)
+        this.redRobot.gamepadIndex = 0;
+        this.blueRobot.gamepadIndex = 1;
+      } // end of create()
 
       // -----------------------------
       // PRELOAD ROBOT FUEL
@@ -1505,8 +1618,18 @@
         return zoneCounts;
       }
 
+      getInputForRobot(robot) {
+        return robot.controls; // keyboard for now; later return merged keyboard+gamepad
+      }
 
-    }
+      getGamepadForRobot(robot) {
+        const idx = robot.gamepadIndex;
+        if (idx == null) return null;
+        return this.input.gamepad.getPad(idx) || null;
+      }
+
+    }  // end of MainScene
+
 
 
     new Phaser.Game({
@@ -1515,6 +1638,10 @@
       width: FIELD_W,
       height: GAME_H,
       backgroundColor: "#1b1b1b",
+      input: {
+        keyboard: true,
+        gamepad: true   // ✅ enable gamepad support
+      },
       physics: {default: "matter", matter: {gravity: {y: 0}, debug: false}},
       scene: [MainScene],
     });
