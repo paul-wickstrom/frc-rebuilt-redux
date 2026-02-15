@@ -119,7 +119,7 @@
     const DEPOT_INSET_X = 8;
     const DEPOT_INSET_Y = 8;
 
-    
+
     // Fuel physics
     const FUEL_RESTITUTION = 0.25;
     const FUEL_FRICTION = 0.02;
@@ -329,21 +329,48 @@
 
         this.state = new scene.RobotState(); // stores array, not a counter
 
-        // Matter bodies
-        this.body = scene.matter.add.rectangle(x, y, ROBOT_W, ROBOT_H, {
-          chamfer: {radius: 10},
+        // Matter bodies (compound: chassis + intake sensor part)
+        const Bodies = Phaser.Physics.Matter.Matter.Bodies;
+        const Body = Phaser.Physics.Matter.Matter.Body;
+
+        const chassis = Bodies.rectangle(x, y, ROBOT_W, ROBOT_H, {
+          chamfer: {radius: 10}
+        });
+
+        // Intake sensor rectangle located in front of robot.
+        // NOTE: This position is initial; it will move with the compound body.
+        const intakeOffsetX = (ROBOT_W / 2) + (INTAKE_W / 2) - 2; // tweak the -2 to taste
+        const intakeOffsetY = 0;
+
+        const intake = Bodies.rectangle(x + intakeOffsetX, y + intakeOffsetY, INTAKE_W, INTAKE_H, {
+          isSensor: true
+        });
+
+        // Tag the intake part so the collision handler can recognize it
+        intake.isIntakeSensor = true;
+        intake.robotName = this.name;
+
+        // Build the compound body
+        const compound = Body.create({
+          parts: [chassis, intake],
           friction: 0.05,
           frictionAir: 0.12,
           restitution: 0.05,
           density: 0.01,
           sleepThreshold: 0
         });
+
+        // Add to world
+        this.body = scene.matter.add.gameObject(scene.add.rectangle(0, 0, 1, 1, 0x000000, 0), compound).body;
+        // ^ creates a dummy GameObject for Matter; your real visuals are your Graphics, so this stays invisible.
+
+        // Collision filtering (apply to the compound root; parts inherit behavior in practice)
         this.body.collisionFilter.category = scene.CAT_ROBOT;
         this.body.collisionFilter.mask = scene.CAT_FUEL | scene.CAT_FIELD_WALLS | scene.CAT_HUBS;
 
-        this.intakeBody = scene.matter.add.rectangle(x, y, INTAKE_W, INTAKE_H, {isStatic: false, isSensor: false});
-        this.intakeBody.collisionFilter.category = scene.CAT_ROBOT;
-        this.intakeBody.collisionFilter.mask = scene.CAT_FIELD_WALLS | scene.CAT_HUBS | scene.CAT_FUEL;
+        // Keep a handle to the intake part for drawing (optional but convenient)
+        this.intakeBody = intake;
+
 
         // Visuals
         this.gfx = scene.add.graphics().setDepth(10);
@@ -419,9 +446,6 @@
         scene.matter.body.setPosition(this.intakeBody, {x: ix, y: iy});
         scene.matter.body.setAngle(this.intakeBody, forwardAng + INTAKE_ANGLE_OFFSET);
         scene.matter.body.setVelocity(this.intakeBody, {x: this.body.velocity.x, y: this.body.velocity.y});
-
-        // Manual intake
-        scene.manualIntake(this);
 
         // Sync visuals
         this.gfx.x = this.body.position.x;
@@ -530,6 +554,7 @@
         fuelG.y = fuel.position.y;
 
         this.body = fuel;
+        this.body.fuelRef = this;
         this.gfx = fuelG;
         this.glowG = null;
 
@@ -573,6 +598,7 @@
         fuelG.y = shot.position.y;
 
         this.body = shot;
+        this.body.fuelRef = this;
         this.gfx = fuelG;
         this.glowG = null;
 
@@ -667,7 +693,7 @@
           }
         };
       }
-      
+
       preload() {
         this.load.image("rebuiltLogo", "RebuiltReduxLogo.jpeg");
       }
@@ -906,7 +932,7 @@
             shootKey: this.keys.space
           }
         });
-        
+
         const bluePose = this.getRobotStartPoseForAlliance("Blue");
         this.blueRobot = new Robot(this, {
           name: "Blue",
@@ -939,44 +965,96 @@
 
           const nowMs = Date.now();
 
+          // Helper: intake sensor can be a part; the flag is usually on the part
+          const isIntakeSensor = (body) => !!(body && (body.isIntakeSensor || body.parent?.isIntakeSensor));
+
+          // Helper: get robot for an intake sensor
+          const robotForIntakeSensor = (body) => {
+            const sensor = body.isIntakeSensor ? body : (body.parent?.isIntakeSensor ? body.parent : body);
+            const name = body.robotName || body.parent?.robotName || sensor?.robotName;
+
+            // Prefer name lookup if present
+            if (name) {
+              if (this.blueRobot && this.blueRobot.name === name) return this.blueRobot;
+              if (this.redRobot && this.redRobot.name === name) return this.redRobot;
+            }
+
+            // Fallback: if you didn’t set robotName, you can still map by identity if you store it
+            return null;
+          };
+
           for (const pair of event.pairs) {
             const a = pair.bodyA;
             const b = pair.bodyB;
 
+            // Normalize fuel to its root body (supports compound parts)
             const fuelBody = isFuel(a) ? (a.parent || a) : (isFuel(b) ? (b.parent || b) : null);
             if (!fuelBody) continue;
 
             const otherBody = (fuelBody === (a.parent || a)) ? b : a;
 
-            // Only score/capture if airborne
-            if (!fuelBody.wasShot) continue;
+            // ------------------------------------------------------------
+            // 1) HUB SENSOR HANDLING (your existing logic, unchanged)
+            //    Only score/capture if airborne (wasShot)
+            // ------------------------------------------------------------
+            if (fuelBody.wasShot) {
+              let hub = null;
+              let scoringRobot = null;
 
-            let hub = null;
-            let scoringRobot = null;
+              if (isBlueSensor(otherBody)) {
+                hub = this.blueHub;
+                scoringRobot = this.blueRobot;
+              } else if (isRedSensor(otherBody)) {
+                hub = this.redHub;
+                scoringRobot = this.redRobot;
+              } else {
+                continue;
+              }
 
-            if (isBlueSensor(otherBody)) {
-              hub = this.blueHub;
-              scoringRobot = this.blueRobot;
-            } else if (isRedSensor(otherBody)) {
-              hub = this.redHub;
-              scoringRobot = this.redRobot;
-            } else {
+              // Score only if hub is active (still accept/capture always)
+              if (hub.active) scoringRobot.state.score += 1;
+
+              const fuelObj = fuelBody.fuelObj;
+              if (fuelObj) {
+                hub.captureFuel(fuelObj, nowMs);
+              } else {
+                // fallback: should not happen
+                this.deleteFuelBody(fuelBody);
+              }
+
+              continue; // IMPORTANT: if it hit a hub sensor, don’t also intake it
+            }
+
+            // ------------------------------------------------------------
+            // 2) INTAKE SENSOR HANDLING (new)
+            //    Touch-n-go: only when fuel enters intake sensor
+            // ------------------------------------------------------------
+            if (!isIntakeSensor(otherBody)) continue;
+
+            // Don’t intake airborne / shot fuel (keeps roles clean)
+            if (fuelBody.isAirborne) continue;
+
+            const robotObj = robotForIntakeSensor(otherBody);
+            if (!robotObj) continue;
+
+            if (robotObj.state.fuelStore.length >= MAX_STORAGE) continue;
+
+            const fuelObj = fuelBody.fuelObj;
+            if (!fuelObj) {
+              // If something went weird, clean it up safely
+              this.deleteFuelBody(fuelBody);
               continue;
             }
 
-            // Score only if hub is active (still accept/capture always)
-            if (hub.active) scoringRobot.state.score += 1;
+            // Tiny cooldown prevents double-grabs from multiple contact pairs
+            if (fuelBody._noIntakeUntilMs && nowMs < fuelBody._noIntakeUntilMs) continue;
+            fuelBody._noIntakeUntilMs = nowMs + 120;
 
-            const fuelObj = fuelBody.fuelObj;
-            if (fuelObj) {
-              hub.captureFuel(fuelObj, nowMs);
-            } else {
-              // fallback: should not happen
-              this.deleteFuelBody(fuelBody);
-            }
+            // Capture into robot storage (your existing pattern)
+            fuelObj.stash(robotObj.name);
+            robotObj.state.fuelStore.push(fuelObj);
           }
-        }
-        );
+        });
 
         // Small HUD (optional)
         this.HUDtext = this.add.text(10, 10, "", {
@@ -1172,7 +1250,7 @@
           }
         }
       }
-      
+
       spawnFuelDepots() {
         // Red depot: along LEFT back wall, offset down from top (like the picture)
         const redStartX = DEPOT_INSET_X + FUEL_R;
@@ -1181,17 +1259,17 @@
         const depotH = (DEPOT_ROWS - 1) * FUEL_SPACING_Y;
 
         // Pick "centers" that match the screenshot feel
-        const redCenterY  = FIELD_H * 0.22; // ~ upper-left depot
+        const redCenterY = FIELD_H * 0.22; // ~ upper-left depot
         const blueCenterY = FIELD_H * 0.78; // ~ lower-right depot
 
-        let redStartY  = redCenterY  - depotH / 2;
+        let redStartY = redCenterY - depotH / 2;
         let blueStartY = blueCenterY - depotH / 2;
 
         // Clamp to keep whole depot inside bounds
         const minY = DEPOT_INSET_Y + FUEL_R;
         const maxY = (FIELD_H - DEPOT_INSET_Y - FUEL_R) - depotH;
 
-        redStartY  = Phaser.Math.Clamp(redStartY,  minY, maxY);
+        redStartY = Phaser.Math.Clamp(redStartY, minY, maxY);
         blueStartY = Phaser.Math.Clamp(blueStartY, minY, maxY);
 
         // Blue depot: along RIGHT back wall
@@ -1201,11 +1279,11 @@
         this.spawnFuelDepot(blueStartX, blueStartY);
 
         // Save depot centers for robot spawning
-        this.redDepotCenter = { x: redStartX + depotW / 2, y: redStartY + depotH / 2 };
-        this.blueDepotCenter = { x: blueStartX + depotW / 2, y: blueStartY + depotH / 2 };
+        this.redDepotCenter = {x: redStartX + depotW / 2, y: redStartY + depotH / 2};
+        this.blueDepotCenter = {x: blueStartX + depotW / 2, y: blueStartY + depotH / 2};
 
       }
-      
+
       getRobotStartPoseForAlliance(name) {
         const isRed = (name === "Red");
         const depot = isRed ? this.redDepotCenter : this.blueDepotCenter;
@@ -1219,39 +1297,7 @@
         const forwardAng = Math.atan2(depot.y - y, depot.x - x);
         const angle = forwardAng - FORWARD_OFFSET; // convert forward angle to body.angle
 
-        return { x, y, angle };
-      }
-
-      manualIntake(robotObj) {
-        if (this.matchOver) return;
-        if (robotObj.state.fuelStore.length >= MAX_STORAGE) return;
-
-        const ix = robotObj.intakeBody.position.x;
-        const iy = robotObj.intakeBody.position.y;
-        const r2 = INTAKE_GRAB_RADIUS * INTAKE_GRAB_RADIUS;
-
-        let grabbed = 0;
-
-        for (let i = this.fuels.length - 1; i >= 0; i--) {
-          const f = this.fuels[i];
-
-          // Skip stored fuel or non-world fuel
-          if (!f.body) continue;
-          if (f.body.isAirborne) continue;
-
-          const dx = f.body.position.x - ix;
-          const dy = f.body.position.y - iy;
-
-          if (dx * dx + dy * dy <= r2) {
-            // Remove from world, keep Fuel object in master list, store in robot
-            f.stash(robotObj.name);
-            robotObj.state.fuelStore.push(f);
-
-            grabbed++;
-            if (grabbed >= INTAKE_GRAB_PER_TICK) break;
-            if (robotObj.state.fuelStore.length >= MAX_STORAGE) break;
-          }
-        }
+        return {x, y, angle};
       }
 
       deleteFuelBody(fuelBody) {
@@ -1335,7 +1381,7 @@
         // Respawn field fuel
         this.spawnFuelGrid();
         this.spawnFuelDepots();
-      
+
 
         // Reset robot states
         this.blueRobot.state = new this.RobotState();
