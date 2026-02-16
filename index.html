@@ -10,28 +10,132 @@
       background: #111;
       height: 100vh;
     }
-
     #layout {
       height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 10px;
     }
 
+    /* Make container the positioning context for overlay UI */
+    #gameContainer {
+      position: relative;
+      display: inline-block; /* shrink-wrap to canvas */
+    }
+
+    /* keep your canvas styling */
     #gameContainer canvas {
       border: 1px solid #333;
       max-width: 98vw;
       max-height: 80vh;
+      display: block; /* remove baseline gap */
+    }
+
+    /* Overlay UI */
+    /* --- override: vertically center the overlay UI --- */
+    #controlBar{
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 10px;
+
+      height: 100px;                 /* adjust 40–52 if you want */
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      align-items: center;          /* centers halves vertically */
+      padding: 0 12px;              /* no vertical padding */
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
+      backdrop-filter: none;
+
+      color: #ddd;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      pointer-events: auto;
+    }
+
+    .leftHalf, .rightHalf{
+      display: flex;
+      align-items: center;          /* centers items vertically */
+      justify-content: center;      /* centers within each half (zone) */
+      gap: 10px;
+      height: 100%;
+    }
+
+    /* Helps text/select baselines not sag */
+    #controlBar label,
+    #controlBar select,
+    .team,
+    .hint{
+      line-height: 1;
+    }
+    
+    .team {
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 8px;
+      border: 1px solid #333;
+    }
+
+    .team.red  { color: #ff8a8a; }
+    .team.blue { color: #7cc7ff; }
+
+    #controlBar label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      opacity: 0.95;
+    }
+
+    #controlBar select {
+      background: #222;
+      color: #ddd;
+      border: 1px solid #444;
+      padding: 4px 8px;
+      border-radius: 8px;
+    }
+
+    .hint {
+      font-size: 12px;
+      opacity: 0.75;
+      white-space: nowrap;
     }
   </style>
 </head>
 
-<body>
-  <div id="layout">
-    <div id="gameContainer"></div>
-  </div>
+  <body>
+    <div id="layout">
+      <div id="gameContainer">
+        <div id="controlBar">
+          <div class="ctrlRow leftHalf">
+            <span class="team red">Red</span>
+            <label>
+              Controller
+              <select id="redControllerSelect">
+                <option value="human">Human</option>
+                <option value="grid">GridRunner</option>
+              </select>
+            </label>
+            <span id="redKbHint" class="hint"></span>
+          </div>
+
+          <div class="ctrlRow rightHalf">
+            <span class="team blue">Blue</span>
+            <label>
+              Controller
+              <select id="blueControllerSelect">
+                <option value="human">Human</option>
+                <option value="grid">GridRunner</option>
+              </select>
+            </label>
+            <span id="blueKbHint" class="hint"></span>
+          </div>
+        </div>
+      </div>
+    </div>
 
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.js"></script>
   <script>
@@ -1169,9 +1273,9 @@
         this.blueRobot.setPose(bluePose);
         this.redRobot.setPose(redPose);
 
-        // TEMPORARY: set blue robot to GridRunnerController
-        this.blueRobot.setController(new GridRunnerController("Blue"));
-
+        // Initialize robot controllers from HTML dropdowns
+        this.initControllerDropdowns();
+        
         // Preload fuel as real Fuel objects in master list, but stashed in robots
         this.preloadRobotFuel();
 
@@ -1306,6 +1410,66 @@
         this.blueRobot.gamepadIndex = 1;
       } // end of create()
 
+      // -----------------------------
+      // CONTROLLER DROPDOWNS
+      // -----------------------------
+      initControllerDropdowns() {
+        const redSel  = document.getElementById("redControllerSelect");
+        const blueSel = document.getElementById("blueControllerSelect");
+        const redHint = document.getElementById("redKbHint");
+        const blueHint = document.getElementById("blueKbHint");
+
+        if (!redSel || !blueSel) {
+          console.warn("Controller selects not found (redControllerSelect / blueControllerSelect).");
+          return;
+        }
+
+        const makeController = (robot, value) => {
+          switch (value) {
+            case "grid":
+              // Adjust this line if your GridRunnerController constructor differs
+              return new GridRunnerController(robot.name);
+            case "human":
+            default:
+              return new HumanController();
+          }
+        };
+        `RED: WASD/QE + Space   BLUE: IJKL/UO + Enter   Reset: R`
+
+        const updateHint = (robot, hintEl, value) => {
+          if (!hintEl) return;
+
+          if (value === "human") {
+            hintEl.style.display = "";
+            hintEl.textContent = (robot.name === "Blue")
+              ? "KB: IJKL/UO + Enter"
+              : "KB: WASD/QE + Space";
+          } else {
+            hintEl.style.display = "none";
+            hintEl.textContent = "";
+          }
+        };
+
+        const apply = (robot, selEl, hintEl) => {
+          const value = selEl.value;
+          robot.setController(makeController(robot, value));
+          updateHint(robot, hintEl, value);
+        };
+
+        // Defaults (match your current expectation)
+        redSel.value = "human";
+        blueSel.value = "grid";
+
+        // Wire events
+        redSel.addEventListener("change", () => apply(this.redRobot, redSel, redHint));
+        blueSel.addEventListener("change", () => apply(this.blueRobot, blueSel, blueHint));
+
+        // Apply once at startup
+        apply(this.redRobot, redSel, redHint);
+        apply(this.blueRobot, blueSel, blueHint);
+      }
+
+      
       // -----------------------------
       // PRELOAD ROBOT FUEL
       // -----------------------------
@@ -1711,11 +1875,13 @@
         const mismatch = this.fuels.length - expectedTotal;
         const invText = (mismatch === 0) ? "OK" : `MISMATCH(Δ=${mismatch})`;
 
+        /*
         this.HUDtext.setText(
           `FuelTotal:${this.fuels.length}  World:${worldCount}  ` +
           `Stored(B:${storedBlue} R:${storedRed}) Hub(B:${storedHubBlue} R:${storedHubRed}) (sleep:${sleeping})  Inv:${invText}\n` +
           `RED: WASD/QE + Space   BLUE: IJKL/UO + Enter   Reset: R`
         );
+        */
       } // end of update()
 
 
