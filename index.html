@@ -774,6 +774,126 @@
 
 
     // -----------------------------
+    // DEPOT RUNNER CONTROLLER
+    // -----------------------------
+    class GridRunnerController extends BaseController {
+      constructor(alliance /* "Blue" | "Red" */) {
+        super();
+        this.alliance = alliance;
+
+        this.state = "SHOOT";
+        this.stateT = 0;
+
+
+        // tuneables (start conservative)
+        this.arriveDist = 28;          // px
+        this.kTurn = 6.0;              // proportional turn gain
+        this.maxSpeed = ROBOT_SPEED * 0.85;
+        this.intakeWaitSec = 1.0;      // just “hover” and let intake do its thing
+        this.shootMaxSec = 2.0;        // shoot for up to this long
+        this.targetFuel = 3;           // leave depot when we have this many
+      }
+
+      getCommands(scene, robot, delta) {
+        if (scene.matchOver) return { vx: 0, vy: 0, omega: 0, shoot: false };
+
+        // Remember starting point of the robot
+        this.shootPoint ??= { x: robot.body.position.x, y: robot.body.position.y };
+
+        const dt = Math.max(0.001, (delta || 16.7) / 1000);
+        this.stateT += dt;
+
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+
+        const depot = scene.getAllianceDepotPoint(this.alliance);
+        const hub = scene.getAllianceHubPoint(this.alliance);
+
+        const fuelCount = robot.state?.fuelStore?.length ?? 0;
+
+        // Helper: drive toward a point with proportional heading
+        const driveTo = (tx, ty, speed) => {
+          const dx = tx - rx;
+          const dy = ty - ry;
+          const dist = Math.hypot(dx, dy);
+
+          if (dist < 1e-6) return { vx: 0, vy: 0, omega: 0, arrived: true };
+
+          const nx = dx / dist;
+          const ny = dy / dist;
+
+          // translation
+          const v = Math.min(speed, this.maxSpeed);
+          const vx = nx * v;
+          const vy = ny * v;
+
+          // rotation: face the travel direction with your “forward” convention
+          // forwardAng = body.angle + FORWARD_OFFSET
+          // desired body.angle = travelHeading - FORWARD_OFFSET
+          const travelHeading = Math.atan2(dy, dx);
+          const desiredBodyAng = travelHeading - FORWARD_OFFSET;
+          const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+
+          // proportional omega, clamped
+          let omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+          return { vx, vy, omega, arrived: dist <= this.arriveDist };
+        };
+
+        // State machine
+        if (this.state === "GO_TO_SHOOT_POINT") {
+          const r = driveTo(this.shootPoint.x, this.shootPoint.y, this.maxSpeed);
+          if (r.arrived) {
+            this._goto("SHOOT");
+            return { vx: 0, vy: 0, omega: 0, shoot: false };
+          }
+          return { vx: r.vx, vy: r.vy, omega: r.omega, shoot: false };
+        }
+
+        if (this.state === "INTAKE_WAIT") {
+          // stay put; intake collision/capture should accumulate fuel
+          // leave when enough fuel or timeout
+          const enoughFuel = fuelCount >= this.targetFuel;
+          const timedOut = this.stateT >= this.intakeWaitSec;
+
+          if (enoughFuel || timedOut) this._goto("GO_TO_SHOOT_POINT");
+
+          return { vx: 0, vy: 0, omega: 0, shoot: false };
+        }
+
+        if (this.state === "GO_TO_GRID") {
+          // const r = driveTo(hub.x, hub.y, this.maxSpeed);
+          const r = driveTo(FIELD_W / 2, FIELD_H / 2, this.maxSpeed);
+          if (r.arrived) {
+            this._goto("INTAKE_WAIT");
+            return { vx: 0, vy: 0, omega: 0, shoot: true };
+          }
+          // shoot=false while traveling
+          return { vx: r.vx, vy: r.vy, omega: r.omega, shoot: false };
+        }
+
+        // SHOOT
+        {
+          const empty = fuelCount <= 0;
+          const timedOut = this.stateT >= this.shootMaxSec;
+
+          // park while shooting; turret aims itself
+          const shoot = !empty;
+
+          if (empty || timedOut) this._goto("GO_TO_GRID");
+
+          return { vx: 0, vy: 0, omega: 0, shoot };
+        }
+      }
+
+      _goto(next) {
+        this.state = next;
+        this.stateT = 0;
+      }
+    } // end of GridRunnerController
+
+
+    // -----------------------------
     // MAIN SCENE
     // -----------------------------
     class MainScene extends Phaser.Scene {
@@ -1048,6 +1168,9 @@
         // Face inward
         this.blueRobot.setPose(bluePose);
         this.redRobot.setPose(redPose);
+
+        // TEMPORARY: set blue robot to GridRunnerController
+        this.blueRobot.setController(new GridRunnerController("Blue"));
 
         // Preload fuel as real Fuel objects in master list, but stashed in robots
         this.preloadRobotFuel();
@@ -1626,6 +1749,22 @@
         const idx = robot.gamepadIndex;
         if (idx == null) return null;
         return this.input.gamepad.getPad(idx) || null;
+      }
+
+      // Helper: get hub center for alliance
+      getAllianceHubPoint(alliance /* "Blue" | "Red" */) {
+        const hub = (alliance === "Blue") ? this.blueHub : this.redHub;
+        // you used scene.blueHub.center earlier, so keep that convention
+        return { x: hub.center.x, y: hub.center.y };
+      }
+
+      // Helper: get depot center for alliance
+      getAllianceDepotPoint(alliance /* "Blue" | "Red" */) {
+        if (this.blueDepotCenter && alliance === "Blue") return { ...this.blueDepotCenter };
+        if (this.redDepotCenter && alliance === "Red") return { ...this.redDepotCenter };
+
+        // Last-resort fallback (won’t be correct for your field, but prevents crashes)
+        return { x: FIELD_W * 0.5, y: FIELD_H * 0.5 };
       }
 
     }  // end of MainScene
