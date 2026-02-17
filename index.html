@@ -10,6 +10,7 @@
       background: #111;
       height: 100vh;
     }
+
     #layout {
       height: 100vh;
       display: flex;
@@ -21,7 +22,8 @@
     /* Make container the positioning context for overlay UI */
     #gameContainer {
       position: relative;
-      display: inline-block; /* shrink-wrap to canvas */
+      display: inline-block;
+      /* shrink-wrap to canvas */
     }
 
     /* keep your canvas styling */
@@ -29,22 +31,26 @@
       border: 1px solid #333;
       max-width: 98vw;
       max-height: 80vh;
-      display: block; /* remove baseline gap */
+      display: block;
+      /* remove baseline gap */
     }
 
     /* Overlay UI */
     /* --- override: vertically center the overlay UI --- */
-    #controlBar{
+    #controlBar {
       position: absolute;
       left: 10px;
       right: 10px;
       bottom: 10px;
 
-      height: 100px;                 /* adjust 40–52 if you want */
+      height: 100px;
+      /* adjust 40–52 if you want */
       display: grid;
       grid-template-columns: 1fr 1fr;
-      align-items: center;          /* centers halves vertically */
-      padding: 0 12px;              /* no vertical padding */
+      align-items: center;
+      /* centers halves vertically */
+      padding: 0 12px;
+      /* no vertical padding */
       background: transparent;
       border: none;
       border-radius: 0;
@@ -56,10 +62,13 @@
       pointer-events: auto;
     }
 
-    .leftHalf, .rightHalf{
+    .leftHalf,
+    .rightHalf {
       display: flex;
-      align-items: center;          /* centers items vertically */
-      justify-content: center;      /* centers within each half (zone) */
+      align-items: center;
+      /* centers items vertically */
+      justify-content: center;
+      /* centers within each half (zone) */
       gap: 10px;
       height: 100%;
     }
@@ -68,10 +77,10 @@
     #controlBar label,
     #controlBar select,
     .team,
-    .hint{
+    .hint {
       line-height: 1;
     }
-    
+
     .team {
       font-weight: 700;
       padding: 2px 8px;
@@ -79,8 +88,13 @@
       border: 1px solid #333;
     }
 
-    .team.red  { color: #ff8a8a; }
-    .team.blue { color: #7cc7ff; }
+    .team.red {
+      color: #ff8a8a;
+    }
+
+    .team.blue {
+      color: #7cc7ff;
+    }
 
     #controlBar label {
       display: flex;
@@ -106,38 +120,38 @@
   </style>
 </head>
 
-  <body>
-    <div id="layout">
-      <div id="gameContainer">
-        <div id="controlBar">
-          <div class="ctrlRow leftHalf">
-            <span class="team red">Red</span>
-            <label>
-              Controller
-              <select id="redControllerSelect">
-                <option value="human">Human</option>
-                <option value="grid">GridRunner</option>
-                <option value="fuelSeeker">FuelSeeker</option>
-              </select>
-            </label>
-            <span id="redKbHint" class="hint"></span>
-          </div>
+<body>
+  <div id="layout">
+    <div id="gameContainer">
+      <div id="controlBar">
+        <div class="ctrlRow leftHalf">
+          <span class="team red">Red</span>
+          <label>
+            Controller
+            <select id="redControllerSelect">
+              <option value="human">Human</option>
+              <option value="grid">GridRunner</option>
+              <option value="fuelSeeker">FuelSeeker</option>
+            </select>
+          </label>
+          <span id="redKbHint" class="hint"></span>
+        </div>
 
-          <div class="ctrlRow rightHalf">
-            <span class="team blue">Blue</span>
-            <label>
-              Controller
-              <select id="blueControllerSelect">
-                <option value="human">Human</option>
-                <option value="grid">GridRunner</option>
-                <option value="fuelSeeker">FuelSeeker</option>
-              </select>
-            </label>
-            <span id="blueKbHint" class="hint"></span>
-          </div>
+        <div class="ctrlRow rightHalf">
+          <span class="team blue">Blue</span>
+          <label>
+            Controller
+            <select id="blueControllerSelect">
+              <option value="human">Human</option>
+              <option value="grid">GridRunner</option>
+              <option value="fuelSeeker">FuelSeeker</option>
+            </select>
+          </label>
+          <span id="blueKbHint" class="hint"></span>
         </div>
       </div>
     </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.js"></script>
   <script>
@@ -901,10 +915,10 @@
       }
 
       getCommands(scene, robot, delta) {
-        if (scene.matchOver) return { vx: 0, vy: 0, omega: 0, shoot: false };
+        if (scene.matchOver) return {vx: 0, vy: 0, omega: 0, shoot: false};
 
         // Remember starting point of the robot
-        this.shootPoint ??= { x: robot.body.position.x, y: robot.body.position.y };
+        this.shootPoint ??= {x: robot.body.position.x, y: robot.body.position.y};
 
         const dt = Math.max(0.001, (delta || 16.7) / 1000);
         this.stateT += dt;
@@ -923,7 +937,7 @@
           const dy = ty - ry;
           const dist = Math.hypot(dx, dy);
 
-          if (dist < 1e-6) return { vx: 0, vy: 0, omega: 0, arrived: true };
+          if (dist < 1e-6) return {vx: 0, vy: 0, omega: 0, arrived: true};
 
           const nx = dx / dist;
           const ny = dy / dist;
@@ -943,7 +957,7 @@
           // proportional omega, clamped
           let omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
 
-          return { vx, vy, omega, arrived: dist <= this.arriveDist };
+          return {vx, vy, omega, arrived: dist <= this.arriveDist};
         };
 
         // State machine
@@ -951,9 +965,9 @@
           const r = driveTo(this.shootPoint.x, this.shootPoint.y, this.maxSpeed);
           if (r.arrived) {
             this._goto("SHOOT");
-            return { vx: 0, vy: 0, omega: 0, shoot: false };
+            return {vx: 0, vy: 0, omega: 0, shoot: false};
           }
-          return { vx: r.vx, vy: r.vy, omega: r.omega, shoot: false };
+          return {vx: r.vx, vy: r.vy, omega: r.omega, shoot: false};
         }
 
         if (this.state === "INTAKE_WAIT") {
@@ -964,7 +978,7 @@
 
           if (enoughFuel || timedOut) this._goto("GO_TO_SHOOT_POINT");
 
-          return { vx: 0, vy: 0, omega: 0, shoot: false };
+          return {vx: 0, vy: 0, omega: 0, shoot: false};
         }
 
         if (this.state === "GO_TO_GRID") {
@@ -972,10 +986,10 @@
           const r = driveTo(FIELD_W / 2, FIELD_H / 2, this.maxSpeed);
           if (r.arrived) {
             this._goto("INTAKE_WAIT");
-            return { vx: 0, vy: 0, omega: 0, shoot: true };
+            return {vx: 0, vy: 0, omega: 0, shoot: true};
           }
           // shoot=false while traveling
-          return { vx: r.vx, vy: r.vy, omega: r.omega, shoot: false };
+          return {vx: r.vx, vy: r.vy, omega: r.omega, shoot: false};
         }
 
         // SHOOT
@@ -988,7 +1002,7 @@
 
           if (empty || timedOut) this._goto("GO_TO_GRID");
 
-          return { vx: 0, vy: 0, omega: 0, shoot };
+          return {vx: 0, vy: 0, omega: 0, shoot};
         }
       }
 
@@ -1567,7 +1581,7 @@
 
         // Initialize robot controllers from HTML dropdowns
         this.initControllerDropdowns();
-        
+
         // Preload fuel as real Fuel objects in master list, but stashed in robots
         this.preloadRobotFuel();
 
@@ -1673,6 +1687,7 @@
         });  // end of collision handler
 
         // Small HUD (optional)
+        /*
         this.HUDtext = this.add.text(10, 10, "", {
           fontFamily: "monospace",
           fontSize: "14px",
@@ -1680,6 +1695,7 @@
           backgroundColor: "rgba(0,0,0,0.4)",
           padding: {x: 8, y: 6},
         }).setDepth(60);
+        */
 
         // Initialize time display
         this.setTimeUI(MATCH_TIME_S);
@@ -1706,7 +1722,7 @@
       // CONTROLLER DROPDOWNS
       // -----------------------------
       initControllerDropdowns() {
-        const redSel  = document.getElementById("redControllerSelect");
+        const redSel = document.getElementById("redControllerSelect");
         const blueSel = document.getElementById("blueControllerSelect");
         const redHint = document.getElementById("redKbHint");
         const blueHint = document.getElementById("blueKbHint");
@@ -1763,7 +1779,7 @@
         apply(this.blueRobot, blueSel, blueHint);
       }
 
-      
+
       // -----------------------------
       // PRELOAD ROBOT FUEL
       // -----------------------------
@@ -2215,16 +2231,16 @@
       getAllianceHubPoint(alliance /* "Blue" | "Red" */) {
         const hub = (alliance === "Blue") ? this.blueHub : this.redHub;
         // you used scene.blueHub.center earlier, so keep that convention
-        return { x: hub.center.x, y: hub.center.y };
+        return {x: hub.center.x, y: hub.center.y};
       }
 
       // Helper: get depot center for alliance
       getAllianceDepotPoint(alliance /* "Blue" | "Red" */) {
-        if (this.blueDepotCenter && alliance === "Blue") return { ...this.blueDepotCenter };
-        if (this.redDepotCenter && alliance === "Red") return { ...this.redDepotCenter };
+        if (this.blueDepotCenter && alliance === "Blue") return {...this.blueDepotCenter};
+        if (this.redDepotCenter && alliance === "Red") return {...this.redDepotCenter};
 
         // Last-resort fallback (won’t be correct for your field, but prevents crashes)
-        return { x: FIELD_W * 0.5, y: FIELD_H * 0.5 };
+        return {x: FIELD_W * 0.5, y: FIELD_H * 0.5};
       }
 
     }  // end of MainScene
