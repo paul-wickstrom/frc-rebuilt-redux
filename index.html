@@ -117,6 +117,7 @@
               <select id="redControllerSelect">
                 <option value="human">Human</option>
                 <option value="grid">GridRunner</option>
+                <option value="fuelSeeker">FuelSeeker</option>
               </select>
             </label>
             <span id="redKbHint" class="hint"></span>
@@ -129,6 +130,7 @@
               <select id="blueControllerSelect">
                 <option value="human">Human</option>
                 <option value="grid">GridRunner</option>
+                <option value="fuelSeeker">FuelSeeker</option>
               </select>
             </label>
             <span id="blueKbHint" class="hint"></span>
@@ -996,6 +998,296 @@
       }
     } // end of GridRunnerController
 
+    // -----------------------------
+    // FUEL SEEKER CONTROLLER
+    // Goal: maximize scored fuel quickly with hub-aware behavior
+    // -----------------------------
+    class FuelSeekerController extends BaseController {
+      constructor(alliance /* "Blue" | "Red" */) {
+        super();
+        this.alliance = alliance;
+
+        this.arriveDist = 24;
+        this.pickupDist = 14;
+        this.maxSpeed = ROBOT_SPEED * 0.92;
+        this.kTurn = 6.0;
+
+        // Anti-stuck recovery
+        this.lastPos = null;
+        this.stuckMs = 0;
+        this.stuckTriggerMs = 1000;
+        this.minMovePx = 1.6;
+        this.unstuckMsRemaining = 0;
+        this.unstuckCmd = {vx: 0, vy: 0, omega: 0, shoot: false};
+        this.unstuckMinMs = 320;
+        this.unstuckMaxMs = 760;
+        this.unstuckSpeedMin = ROBOT_SPEED * 0.75;
+        this.unstuckSpeedMax = ROBOT_SPEED * 1.05;
+      }
+
+      getCommands(scene, robot, delta) {
+        if (scene.matchOver) return {vx: 0, vy: 0, omega: 0, shoot: false};
+        const dtMs = Math.max(1, delta || 16.7);
+        const fuelCount = robot.state?.fuelStore?.length ?? 0;
+
+        if (this.unstuckMsRemaining > 0) {
+          this.unstuckMsRemaining -= dtMs;
+          this.lastPos = {x: robot.body.position.x, y: robot.body.position.y};
+          return {
+            vx: this.unstuckCmd.vx,
+            vy: this.unstuckCmd.vy,
+            omega: this.unstuckCmd.omega,
+            shoot: fuelCount > 0
+          };
+        }
+
+        const allianceZoneId = (this.alliance === "Blue") ? ZoneId.BLUE : ZoneId.RED;
+        const currentZoneId = scene.getZoneForX(robot.body.position.x).id;
+        const hub = (this.alliance === "Blue") ? scene.blueHub : scene.redHub;
+        const hubPoint = scene.getAllianceHubPoint(this.alliance);
+
+        const allianceFuelCount = this.countGroundFuelInZone(scene, allianceZoneId);
+        const neutralFuelCount = this.countGroundFuelInZone(scene, ZoneId.NEUTRAL);
+        let cmd = {vx: 0, vy: 0, omega: 0, shoot: false};
+
+        // Hub active:
+        // - Prefer alliance-zone fuel and score from alliance zone.
+        // - If alliance is dry, load in neutral then return alliance to score.
+        if (hub.active) {
+          if (allianceFuelCount > 0) {
+            if (currentZoneId !== allianceZoneId) {
+              const reentry = this.getAllianceReentryPoint(this.alliance, robot.body.position.y);
+              const move = this.driveTo(robot, reentry.x, reentry.y);
+              cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+
+            const nearestAllianceFuel = this.findNearestGroundFuelInZone(
+              scene,
+              allianceZoneId,
+              robot.body.position.x,
+              robot.body.position.y
+            );
+
+            if (nearestAllianceFuel) {
+              const dist = Phaser.Math.Distance.Between(
+                robot.body.position.x, robot.body.position.y,
+                nearestAllianceFuel.body.position.x, nearestAllianceFuel.body.position.y
+              );
+
+              const shoot = fuelCount > 0;
+              if (dist <= this.pickupDist) {
+                cmd = {vx: 0, vy: 0, omega: 0, shoot};
+                return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+              }
+
+              const move = this.driveTo(robot, nearestAllianceFuel.body.position.x, nearestAllianceFuel.body.position.y);
+              cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+
+            if (fuelCount > 0) {
+              const move = this.driveTo(robot, hubPoint.x, hubPoint.y);
+              cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: true};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+            cmd = {vx: 0, vy: 0, omega: 0, shoot: false};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
+          // Alliance zone empty: load neutral to full, then return alliance to score.
+          if (fuelCount >= MAX_STORAGE) {
+            if (currentZoneId !== allianceZoneId) {
+              const reentry = this.getAllianceReentryPoint(this.alliance, robot.body.position.y);
+              const move = this.driveTo(robot, reentry.x, reentry.y);
+              cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+            const move = this.driveTo(robot, hubPoint.x, hubPoint.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: fuelCount > 0};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
+          if (currentZoneId !== ZoneId.NEUTRAL) {
+            const neutralPoint = this.getNeutralAnchor(robot.body.position.y);
+            const move = this.driveTo(robot, neutralPoint.x, neutralPoint.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
+          const nearestNeutralFuel = this.findNearestGroundFuelInZone(
+            scene,
+            ZoneId.NEUTRAL,
+            robot.body.position.x,
+            robot.body.position.y
+          );
+
+          if (nearestNeutralFuel) {
+            const dist = Phaser.Math.Distance.Between(
+              robot.body.position.x, robot.body.position.y,
+              nearestNeutralFuel.body.position.x, nearestNeutralFuel.body.position.y
+            );
+            if (dist <= this.pickupDist) {
+              cmd = {vx: 0, vy: 0, omega: 0, shoot: false};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+            const move = this.driveTo(robot, nearestNeutralFuel.body.position.x, nearestNeutralFuel.body.position.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
+          // No neutral fuel found: return alliance if loaded, otherwise hold neutral.
+          if (fuelCount > 0) {
+            const reentry = this.getAllianceReentryPoint(this.alliance, robot.body.position.y);
+            const move = this.driveTo(robot, reentry.x, reentry.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+          cmd = {vx: 0, vy: 0, omega: 0, shoot: false};
+          return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+        }
+
+        // Hub inactive:
+        // Live in neutral and keep scooping/shooting.
+        if (currentZoneId !== ZoneId.NEUTRAL) {
+          const neutralPoint = this.getNeutralAnchor(robot.body.position.y);
+          const move = this.driveTo(robot, neutralPoint.x, neutralPoint.y);
+          cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: fuelCount > 0};
+          return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+        }
+
+        if (neutralFuelCount > 0) {
+          const nearestNeutralFuel = this.findNearestGroundFuelInZone(
+            scene,
+            ZoneId.NEUTRAL,
+            robot.body.position.x,
+            robot.body.position.y
+          );
+          if (nearestNeutralFuel) {
+            const dist = Phaser.Math.Distance.Between(
+              robot.body.position.x, robot.body.position.y,
+              nearestNeutralFuel.body.position.x, nearestNeutralFuel.body.position.y
+            );
+            if (dist <= this.pickupDist) {
+              cmd = {vx: 0, vy: 0, omega: 0, shoot: fuelCount > 0};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+            const move = this.driveTo(robot, nearestNeutralFuel.body.position.x, nearestNeutralFuel.body.position.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: fuelCount > 0};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+        }
+
+        cmd = {vx: 0, vy: 0, omega: 0, shoot: fuelCount > 0};
+        return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+      }
+
+      driveTo(robot, tx, ty) {
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const dx = tx - rx;
+        const dy = ty - ry;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist <= this.arriveDist) return {vx: 0, vy: 0, omega: 0, arrived: true};
+
+        const nx = dx / Math.max(1e-6, dist);
+        const ny = dy / Math.max(1e-6, dist);
+        const vx = nx * this.maxSpeed;
+        const vy = ny * this.maxSpeed;
+
+        const travelHeading = Math.atan2(dy, dx);
+        const desiredBodyAng = travelHeading - FORWARD_OFFSET;
+        const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+        const omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+        return {vx, vy, omega, arrived: false};
+      }
+
+      applyAntiStuck(robot, plannedCmd, dtMs, fuelCount) {
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const speedCmd = Math.hypot(plannedCmd.vx || 0, plannedCmd.vy || 0);
+        const turningCmd = Math.abs(plannedCmd.omega || 0);
+        const intendsMotion = speedCmd > 0.2 || turningCmd > 0.01;
+
+        if (!this.lastPos) {
+          this.lastPos = {x: rx, y: ry};
+          this.stuckMs = 0;
+          return plannedCmd;
+        }
+
+        const movedPx = Phaser.Math.Distance.Between(rx, ry, this.lastPos.x, this.lastPos.y);
+        this.lastPos = {x: rx, y: ry};
+
+        if (intendsMotion && movedPx < this.minMovePx) {
+          this.stuckMs += dtMs;
+        } else {
+          this.stuckMs = 0;
+        }
+
+        if (this.stuckMs < this.stuckTriggerMs) return plannedCmd;
+
+        this.stuckMs = 0;
+        const escapeAng = Phaser.Math.FloatBetween(-Math.PI, Math.PI);
+        const escapeSpeed = Phaser.Math.FloatBetween(this.unstuckSpeedMin, this.unstuckSpeedMax);
+        const escapeOmega = Phaser.Math.FloatBetween(-ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+        this.unstuckCmd = {
+          vx: Math.cos(escapeAng) * escapeSpeed,
+          vy: Math.sin(escapeAng) * escapeSpeed,
+          omega: escapeOmega,
+          shoot: fuelCount > 0
+        };
+        this.unstuckMsRemaining = Phaser.Math.Between(this.unstuckMinMs, this.unstuckMaxMs);
+        return this.unstuckCmd;
+      }
+
+      getAllianceReentryPoint(alliance, yHint) {
+        const y = Phaser.Math.Clamp(yHint, 24, FIELD_H - 24);
+        if (alliance === "Blue") return {x: BLUE_LINE_X + 40, y};
+        return {x: RED_LINE_X - 40, y};
+      }
+
+      getNeutralAnchor(yHint) {
+        return {
+          x: (RED_LINE_X + BLUE_LINE_X) / 2,
+          y: Phaser.Math.Clamp(yHint, 24, FIELD_H - 24)
+        };
+      }
+
+      countGroundFuelInZone(scene, zoneId) {
+        let count = 0;
+        for (const f of scene.fuels) {
+          if (!f.body) continue;
+          if (f.body.isAirborne) continue;
+          if (scene.getZoneForX(f.body.position.x).id === zoneId) count++;
+        }
+        return count;
+      }
+
+      findNearestGroundFuelInZone(scene, zoneId, x, y) {
+        let best = null;
+        let bestD2 = Infinity;
+
+        for (const f of scene.fuels) {
+          if (!f.body) continue;
+          if (f.body.isAirborne) continue;
+          if (scene.getZoneForX(f.body.position.x).id !== zoneId) continue;
+
+          const dx = f.body.position.x - x;
+          const dy = f.body.position.y - y;
+          const d2 = dx * dx + dy * dy;
+
+          if (d2 < bestD2) {
+            bestD2 = d2;
+            best = f;
+          }
+        }
+        return best;
+      }
+    } // end of FuelSeekerController
+
 
     // -----------------------------
     // MAIN SCENE
@@ -1426,6 +1718,8 @@
 
         const makeController = (robot, value) => {
           switch (value) {
+            case "fuelSeeker":
+              return new FuelSeekerController(robot.name);
             case "grid":
               // Adjust this line if your GridRunnerController constructor differs
               return new GridRunnerController(robot.name);
