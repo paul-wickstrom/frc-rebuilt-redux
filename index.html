@@ -1023,10 +1023,10 @@
     } // end of CursorController
 
     // -----------------------------
-    // FUEL SEEKER CONTROLLER
-    // Goal: maximize scored fuel quickly with hub-aware behavior
+    // AUTO BASE CONTROLLER
+    // Shared auto movement + anti-stuck + fuel query helpers.
     // -----------------------------
-    class FuelSeekerController extends BaseController {
+    class AutoBaseController extends BaseController {
       constructor(alliance /* "Blue" | "Red" */) {
         super();
         this.alliance = alliance;
@@ -1047,6 +1047,122 @@
         this.unstuckMaxMs = 760;
         this.unstuckSpeedMin = ROBOT_SPEED * 0.75;
         this.unstuckSpeedMax = ROBOT_SPEED * 1.05;
+
+      }
+
+      driveTo(robot, tx, ty) {
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const dx = tx - rx;
+        const dy = ty - ry;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist <= this.arriveDist) return {vx: 0, vy: 0, omega: 0, arrived: true};
+
+        const nx = dx / Math.max(1e-6, dist);
+        const ny = dy / Math.max(1e-6, dist);
+        const vx = nx * this.maxSpeed;
+        const vy = ny * this.maxSpeed;
+
+        const travelHeading = Math.atan2(dy, dx);
+        const desiredBodyAng = travelHeading - FORWARD_OFFSET;
+        const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+        const omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+        return {vx, vy, omega, arrived: false};
+      }
+
+      applyAntiStuck(robot, plannedCmd, dtMs, fuelCount) {
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const speedCmd = Math.hypot(plannedCmd.vx || 0, plannedCmd.vy || 0);
+        const turningCmd = Math.abs(plannedCmd.omega || 0);
+        const intendsMotion = speedCmd > 0.2 || turningCmd > 0.01;
+
+        if (!this.lastPos) {
+          this.lastPos = {x: rx, y: ry};
+          this.stuckMs = 0;
+          return plannedCmd;
+        }
+
+        const movedPx = Phaser.Math.Distance.Between(rx, ry, this.lastPos.x, this.lastPos.y);
+        this.lastPos = {x: rx, y: ry};
+
+        if (intendsMotion && movedPx < this.minMovePx) {
+          this.stuckMs += dtMs;
+        } else {
+          this.stuckMs = 0;
+        }
+
+        if (this.stuckMs < this.stuckTriggerMs) return plannedCmd;
+
+        this.stuckMs = 0;
+        const escapeAng = Phaser.Math.FloatBetween(-Math.PI, Math.PI);
+        const escapeSpeed = Phaser.Math.FloatBetween(this.unstuckSpeedMin, this.unstuckSpeedMax);
+        const escapeOmega = Phaser.Math.FloatBetween(-ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+        this.unstuckCmd = {
+          vx: Math.cos(escapeAng) * escapeSpeed,
+          vy: Math.sin(escapeAng) * escapeSpeed,
+          omega: escapeOmega,
+          shoot: fuelCount > 0
+        };
+        this.unstuckMsRemaining = Phaser.Math.Between(this.unstuckMinMs, this.unstuckMaxMs);
+        return this.unstuckCmd;
+      }
+
+      getAllianceReentryPoint(alliance, yHint) {
+        const y = Phaser.Math.Clamp(yHint, 24, FIELD_H - 24);
+        if (alliance === "Blue") return {x: BLUE_LINE_X + 40, y};
+        return {x: RED_LINE_X - 40, y};
+      }
+
+      getNeutralAnchor(yHint) {
+        return {
+          x: (RED_LINE_X + BLUE_LINE_X) / 2,
+          y: Phaser.Math.Clamp(yHint, 24, FIELD_H - 24)
+        };
+      }
+
+      countGroundFuelInZone(scene, zoneId) {
+        let count = 0;
+        for (const f of scene.fuels) {
+          if (!f.body) continue;
+          if (f.body.isAirborne) continue;
+          if (scene.getZoneForX(f.body.position.x).id === zoneId) count++;
+        }
+        return count;
+      }
+
+      findNearestGroundFuelInZone(scene, zoneId, x, y) {
+        let best = null;
+        let bestD2 = Infinity;
+
+        for (const f of scene.fuels) {
+          if (!f.body) continue;
+          if (f.body.isAirborne) continue;
+          if (scene.getZoneForX(f.body.position.x).id !== zoneId) continue;
+
+          const dx = f.body.position.x - x;
+          const dy = f.body.position.y - y;
+          const d2 = dx * dx + dy * dy;
+
+          if (d2 < bestD2) {
+            bestD2 = d2;
+            best = f;
+          }
+        }
+        return best;
+      }
+    } // end of AutoBaseController
+
+    // -----------------------------
+    // FUEL SEEKER CONTROLLER
+    // Goal: maximize scored fuel quickly with hub-aware behavior
+    // -----------------------------
+    class FuelSeekerController extends AutoBaseController {
+      constructor(alliance /* "Blue" | "Red" */) {
+        super(alliance);
       }
 
       getCommands(scene, robot, delta) {
@@ -1205,113 +1321,7 @@
         cmd = {vx: 0, vy: 0, omega: 0, shoot: fuelCount > 0};
         return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
       }
-
-      driveTo(robot, tx, ty) {
-        const rx = robot.body.position.x;
-        const ry = robot.body.position.y;
-        const dx = tx - rx;
-        const dy = ty - ry;
-        const dist = Math.hypot(dx, dy);
-
-        if (dist <= this.arriveDist) return {vx: 0, vy: 0, omega: 0, arrived: true};
-
-        const nx = dx / Math.max(1e-6, dist);
-        const ny = dy / Math.max(1e-6, dist);
-        const vx = nx * this.maxSpeed;
-        const vy = ny * this.maxSpeed;
-
-        const travelHeading = Math.atan2(dy, dx);
-        const desiredBodyAng = travelHeading - FORWARD_OFFSET;
-        const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
-        const omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
-
-        return {vx, vy, omega, arrived: false};
-      }
-
-      applyAntiStuck(robot, plannedCmd, dtMs, fuelCount) {
-        const rx = robot.body.position.x;
-        const ry = robot.body.position.y;
-        const speedCmd = Math.hypot(plannedCmd.vx || 0, plannedCmd.vy || 0);
-        const turningCmd = Math.abs(plannedCmd.omega || 0);
-        const intendsMotion = speedCmd > 0.2 || turningCmd > 0.01;
-
-        if (!this.lastPos) {
-          this.lastPos = {x: rx, y: ry};
-          this.stuckMs = 0;
-          return plannedCmd;
-        }
-
-        const movedPx = Phaser.Math.Distance.Between(rx, ry, this.lastPos.x, this.lastPos.y);
-        this.lastPos = {x: rx, y: ry};
-
-        if (intendsMotion && movedPx < this.minMovePx) {
-          this.stuckMs += dtMs;
-        } else {
-          this.stuckMs = 0;
-        }
-
-        if (this.stuckMs < this.stuckTriggerMs) return plannedCmd;
-
-        this.stuckMs = 0;
-        const escapeAng = Phaser.Math.FloatBetween(-Math.PI, Math.PI);
-        const escapeSpeed = Phaser.Math.FloatBetween(this.unstuckSpeedMin, this.unstuckSpeedMax);
-        const escapeOmega = Phaser.Math.FloatBetween(-ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
-
-        this.unstuckCmd = {
-          vx: Math.cos(escapeAng) * escapeSpeed,
-          vy: Math.sin(escapeAng) * escapeSpeed,
-          omega: escapeOmega,
-          shoot: fuelCount > 0
-        };
-        this.unstuckMsRemaining = Phaser.Math.Between(this.unstuckMinMs, this.unstuckMaxMs);
-        return this.unstuckCmd;
-      }
-
-      getAllianceReentryPoint(alliance, yHint) {
-        const y = Phaser.Math.Clamp(yHint, 24, FIELD_H - 24);
-        if (alliance === "Blue") return {x: BLUE_LINE_X + 40, y};
-        return {x: RED_LINE_X - 40, y};
-      }
-
-      getNeutralAnchor(yHint) {
-        return {
-          x: (RED_LINE_X + BLUE_LINE_X) / 2,
-          y: Phaser.Math.Clamp(yHint, 24, FIELD_H - 24)
-        };
-      }
-
-      countGroundFuelInZone(scene, zoneId) {
-        let count = 0;
-        for (const f of scene.fuels) {
-          if (!f.body) continue;
-          if (f.body.isAirborne) continue;
-          if (scene.getZoneForX(f.body.position.x).id === zoneId) count++;
-        }
-        return count;
-      }
-
-      findNearestGroundFuelInZone(scene, zoneId, x, y) {
-        let best = null;
-        let bestD2 = Infinity;
-
-        for (const f of scene.fuels) {
-          if (!f.body) continue;
-          if (f.body.isAirborne) continue;
-          if (scene.getZoneForX(f.body.position.x).id !== zoneId) continue;
-
-          const dx = f.body.position.x - x;
-          const dy = f.body.position.y - y;
-          const d2 = dx * dx + dy * dy;
-
-          if (d2 < bestD2) {
-            bestD2 = d2;
-            best = f;
-          }
-        }
-        return best;
-      }
     } // end of FuelSeekerController
-
 
     // -----------------------------
     // MAIN SCENE
