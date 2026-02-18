@@ -129,9 +129,9 @@
           <label>
             Controller
             <select id="redControllerSelect">
-              <option value="human">Human</option>
-              <option value="grid">GridRunner</option>
-              <option value="fuelSeeker">FuelSeeker</option>
+              <option value="human">Gamepad/KB</option>
+              <option value="cursor">Cursor</option>
+              <option value="fuelSeeker">Auto Fuel Seeker</option>
             </select>
           </label>
           <span id="redKbHint" class="hint"></span>
@@ -142,9 +142,9 @@
           <label>
             Controller
             <select id="blueControllerSelect">
-              <option value="human">Human</option>
-              <option value="grid">GridRunner</option>
-              <option value="fuelSeeker">FuelSeeker</option>
+              <option value="human">Gamepad/KB</option>
+              <option value="cursor">Cursor</option>
+              <option value="fuelSeeker">Auto Fuel Seeker</option>
             </select>
           </label>
           <span id="blueKbHint" class="hint"></span>
@@ -894,123 +894,64 @@
 
 
     // -----------------------------
-    // DEPOT RUNNER CONTROLLER
+    // CURSOR CONTROLLER
     // -----------------------------
-    class GridRunnerController extends BaseController {
-      constructor(alliance /* "Blue" | "Red" */) {
+    class CursorController extends BaseController {
+      constructor() {
         super();
-        this.alliance = alliance;
-
-        this.state = "SHOOT";
-        this.stateT = 0;
-
-
-        // tuneables (start conservative)
-        this.arriveDist = 28;          // px
-        this.kTurn = 6.0;              // proportional turn gain
-        this.maxSpeed = ROBOT_SPEED * 0.85;
-        this.intakeWaitSec = 1.0;      // just “hover” and let intake do its thing
-        this.shootMaxSec = 2.0;        // shoot for up to this long
-        this.targetFuel = 3;           // leave depot when we have this many
+        this.driveDeadband = ROBOT_W * 0.45;
+        this.turnDeadbandRad = 0.08;
+        this.kTurn = 5.0;
       }
 
       getCommands(scene, robot, delta) {
         if (scene.matchOver) return {vx: 0, vy: 0, omega: 0, shoot: false};
 
-        // Remember starting point of the robot
-        this.shootPoint ??= {x: robot.body.position.x, y: robot.body.position.y};
+        const p = scene.input?.activePointer;
+        if (!p) return {vx: 0, vy: 0, omega: 0, shoot: false};
 
-        const dt = Math.max(0.001, (delta || 16.7) / 1000);
-        this.stateT += dt;
+        // worldX/worldY are robust with camera and CSS-scaled canvases.
+        const px = Number.isFinite(p.worldX) ? p.worldX : p.x;
+        const py = Number.isFinite(p.worldY) ? p.worldY : p.y;
+        const onField = px >= 0 && px <= FIELD_W && py >= 0 && py <= FIELD_H;
+
+        const shoot = !!(
+          p.isDown ||
+          p.leftButtonDown?.() ||
+          p.middleButtonDown?.() ||
+          p.rightButtonDown?.()
+        );
+
+        if (!onField) return {vx: 0, vy: 0, omega: 0, shoot};
 
         const rx = robot.body.position.x;
         const ry = robot.body.position.y;
+        const dx = px - rx;
+        const dy = py - ry;
+        const dist = Math.hypot(dx, dy);
 
-        const depot = scene.getAllianceDepotPoint(this.alliance);
-        const hub = scene.getAllianceHubPoint(this.alliance);
-
-        const fuelCount = robot.state?.fuelStore?.length ?? 0;
-
-        // Helper: drive toward a point with proportional heading
-        const driveTo = (tx, ty, speed) => {
-          const dx = tx - rx;
-          const dy = ty - ry;
-          const dist = Math.hypot(dx, dy);
-
-          if (dist < 1e-6) return {vx: 0, vy: 0, omega: 0, arrived: true};
-
-          const nx = dx / dist;
-          const ny = dy / dist;
-
-          // translation
-          const v = Math.min(speed, this.maxSpeed);
-          const vx = nx * v;
-          const vy = ny * v;
-
-          // rotation: face the travel direction with your “forward” convention
-          // forwardAng = body.angle + FORWARD_OFFSET
-          // desired body.angle = travelHeading - FORWARD_OFFSET
-          const travelHeading = Math.atan2(dy, dx);
-          const desiredBodyAng = travelHeading - FORWARD_OFFSET;
-          const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
-
-          // proportional omega, clamped
-          let omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
-
-          return {vx, vy, omega, arrived: dist <= this.arriveDist};
-        };
-
-        // State machine
-        if (this.state === "GO_TO_SHOOT_POINT") {
-          const r = driveTo(this.shootPoint.x, this.shootPoint.y, this.maxSpeed);
-          if (r.arrived) {
-            this._goto("SHOOT");
-            return {vx: 0, vy: 0, omega: 0, shoot: false};
-          }
-          return {vx: r.vx, vy: r.vy, omega: r.omega, shoot: false};
-        }
-
-        if (this.state === "INTAKE_WAIT") {
-          // stay put; intake collision/capture should accumulate fuel
-          // leave when enough fuel or timeout
-          const enoughFuel = fuelCount >= this.targetFuel;
-          const timedOut = this.stateT >= this.intakeWaitSec;
-
-          if (enoughFuel || timedOut) this._goto("GO_TO_SHOOT_POINT");
-
-          return {vx: 0, vy: 0, omega: 0, shoot: false};
-        }
-
-        if (this.state === "GO_TO_GRID") {
-          // const r = driveTo(hub.x, hub.y, this.maxSpeed);
-          const r = driveTo(FIELD_W / 2, FIELD_H / 2, this.maxSpeed);
-          if (r.arrived) {
-            this._goto("INTAKE_WAIT");
-            return {vx: 0, vy: 0, omega: 0, shoot: true};
-          }
-          // shoot=false while traveling
-          return {vx: r.vx, vy: r.vy, omega: r.omega, shoot: false};
-        }
-
-        // SHOOT
-        {
-          const empty = fuelCount <= 0;
-          const timedOut = this.stateT >= this.shootMaxSec;
-
-          // park while shooting; turret aims itself
-          const shoot = !empty;
-
-          if (empty || timedOut) this._goto("GO_TO_GRID");
-
+        if (dist <= this.driveDeadband) {
           return {vx: 0, vy: 0, omega: 0, shoot};
         }
-      }
 
-      _goto(next) {
-        this.state = next;
-        this.stateT = 0;
+        const nx = dx / dist;
+        const ny = dy / dist;
+
+        const slowRadius = ROBOT_W * 2.0;
+        const speedScale = Phaser.Math.Clamp((dist - this.driveDeadband) / slowRadius, 0.25, 1.0);
+        const vx = nx * ROBOT_SPEED * speedScale;
+        const vy = ny * ROBOT_SPEED * speedScale;
+
+        const desiredForwardAng = Math.atan2(dy, dx);
+        const desiredBodyAng = desiredForwardAng - FORWARD_OFFSET;
+        const turnErr = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+        const omega = (Math.abs(turnErr) < this.turnDeadbandRad)
+          ? 0
+          : Phaser.Math.Clamp(turnErr * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+
+        return {vx, vy, omega, shoot};
       }
-    } // end of GridRunnerController
+    } // end of CursorController
 
     // -----------------------------
     // FUEL SEEKER CONTROLLER
@@ -1734,11 +1675,10 @@
 
         const makeController = (robot, value) => {
           switch (value) {
+            case "cursor":
+              return new CursorController();
             case "fuelSeeker":
               return new FuelSeekerController(robot.name);
-            case "grid":
-              // Adjust this line if your GridRunnerController constructor differs
-              return new GridRunnerController(robot.name);
             case "human":
             default:
               return new HumanController();
@@ -1767,8 +1707,8 @@
         };
 
         // Defaults (match your current expectation)
-        redSel.value = "human";
-        blueSel.value = "grid";
+        redSel.value = "cursor";
+        blueSel.value = "fuelSeeker";
 
         // Wire events
         redSel.addEventListener("change", () => apply(this.redRobot, redSel, redHint));
