@@ -562,9 +562,38 @@
         s.matter.body.setAngle(this.body, angle);
         s.matter.body.setAngularVelocity(this.body, 0);
 
-        s.matter.body.setPosition(this.intakeBody, {x, y});
+        const forwardAng = angle + FORWARD_OFFSET;
+        const ix = x + Math.cos(forwardAng) * INTAKE_OFFSET;
+        const iy = y + Math.sin(forwardAng) * INTAKE_OFFSET;
+
+        s.matter.body.setPosition(this.intakeBody, {x: ix, y: iy});
         s.matter.body.setVelocity(this.intakeBody, {x: 0, y: 0});
-        s.matter.body.setAngle(this.intakeBody, angle);
+        s.matter.body.setAngle(this.intakeBody, forwardAng + INTAKE_ANGLE_OFFSET);
+
+        // Keep visuals in sync even while the match is paused (initial load/reset).
+        this.gfx.x = x;
+        this.gfx.y = y;
+        this.gfx.rotation = angle;
+
+        this.intakeG.x = ix;
+        this.intakeG.y = iy;
+        this.intakeG.rotation = forwardAng + INTAKE_ANGLE_OFFSET;
+        this.intakeG.clear();
+        this.intakeG.lineStyle(2, 0xff4444, 1);
+        const w = INTAKE_W, h = INTAKE_H;
+        this.intakeG.lineBetween(-w / 2, -h / 2, -w / 2, h / 2);
+        this.intakeG.lineBetween(w / 2, -h / 2, w / 2, h / 2);
+        this.intakeG.lineBetween(-w / 2, h / 2, w / 2, h / 2);
+
+        this.turretAngle = forwardAng;
+        this.turretG.x = x;
+        this.turretG.y = y;
+        this.turretG.rotation = this.turretAngle;
+
+        this.label.setText(`${this.state?.fuelStore?.length ?? 0}`);
+        this.label.x = x;
+        this.label.y = y;
+        this.label.rotation = 0;
       }
 
       update(delta) {
@@ -961,7 +990,8 @@
           p.rightButtonDown?.()
         );
 
-        if (!onField) return {vx: 0, vy: 0, omega: 0, shoot};
+        // Ignore clicks in UI area (e.g., Start/Stop button) so they do not fire shots.
+        if (!onField) return {vx: 0, vy: 0, omega: 0, shoot: false};
 
         const rx = robot.body.position.x;
         const ry = robot.body.position.y;
