@@ -284,6 +284,15 @@
       {name: "SHIFT4", durationS: 25},
       {name: "ENDGAME", durationS: 30},
     ];
+    const TIMEFRAME_DISPLAY_LABELS = Object.freeze({
+      AUTO: "AUTO",
+      TRANSITION: "1/6",
+      SHIFT1: "2/6",
+      SHIFT2: "3/6",
+      SHIFT3: "4/6",
+      SHIFT4: "5/6",
+      ENDGAME: "6/6",
+    });
     const MATCH_TIME_S = TIMEFRAMES.reduce((a, t) => a + t.durationS, 0); // 150
 
     // -----------------------------
@@ -331,6 +340,8 @@
 
         this.colorFill = colorFill;
         this.colorLine = colorLine;
+        this.flashWarning = false;
+        this.flashOn = false;
 
         this.draw();
       }
@@ -338,6 +349,25 @@
       setActive(isActive) {
         this.active = !!isActive;
         this.draw();
+      }
+
+      setFlashWarning(isWarning, nowMs) {
+        const wantWarning = !!isWarning;
+        if (!wantWarning) {
+          if (this.flashWarning || this.flashOn) {
+            this.flashWarning = false;
+            this.flashOn = false;
+            this.draw();
+          }
+          return;
+        }
+
+        const blinkOn = (Math.floor(nowMs / 180) % 2) === 0;
+        if (!this.flashWarning || this.flashOn !== blinkOn) {
+          this.flashWarning = true;
+          this.flashOn = blinkOn;
+          this.draw();
+        }
       }
 
       draw() {
@@ -359,7 +389,12 @@
         this.gfx.strokeRect(x - HUB_W / 2, y - HUB_H / 2, HUB_W, HUB_H);
 
         // Hex glow fill
-        const alpha = this.active ? HUB_GLOW_ALPHA : HUB_GLOW_ALPHA_INACTIVE;
+        let alpha = this.active ? HUB_GLOW_ALPHA : HUB_GLOW_ALPHA_INACTIVE;
+        let glowColor = FUEL_COLOR_SHOT;
+        if (this.flashWarning && this.flashOn) {
+          alpha = 0.92;
+          glowColor = 0xffffff;
+        }
 
         const pts = [];
         for (let i = 0; i < 6; i++) {
@@ -368,7 +403,7 @@
         }
 
         if (alpha > 0) {
-          this.gfx.fillStyle(FUEL_COLOR_SHOT, alpha);
+          this.gfx.fillStyle(glowColor, alpha);
           this.gfx.beginPath();
           this.gfx.moveTo(pts[0].x, pts[0].y);
           for (let i = 1; i < pts.length; i++) this.gfx.lineTo(pts[i].x, pts[i].y);
@@ -377,7 +412,11 @@
         }
 
         // Hex outline always
-        this.hexOutlineG.lineStyle(2, this.colorLine, 1);
+        if (this.flashWarning && this.flashOn) {
+          this.hexOutlineG.lineStyle(4, 0xffffff, 1);
+        } else {
+          this.hexOutlineG.lineStyle(2, this.colorLine, 1);
+        }
         for (let i = 0; i < 6; i++) {
           const p0 = pts[i];
           const p1 = pts[(i + 1) % 6];
@@ -487,7 +526,7 @@
 
         // Collision filtering (apply to the compound root; parts inherit behavior in practice)
         this.body.collisionFilter.category = scene.CAT_ROBOT;
-        this.body.collisionFilter.mask = scene.CAT_FUEL | scene.CAT_FIELD_WALLS | scene.CAT_HUBS;
+        this.body.collisionFilter.mask = scene.CAT_FUEL | scene.CAT_FIELD_WALLS | scene.CAT_HUBS | scene.CAT_ROBOT;
 
         // Keep a handle to the intake part for drawing (optional but convenient)
         this.intakeBody = intake;
@@ -1364,9 +1403,34 @@
         this.uiG.lineStyle(2, 0xaaaaaa, 1);
         this.uiG.strokeRoundedRect(timerX0, timerY0, timerBoxW, timerBoxH, 6);
 
-        this.timeframeText = this.add.text(FIELD_W / 2, timerY0 + 12, "AUTO", {
+        const timerCenterX = FIELD_W / 2;
+        const headerRowW = 106;
+        const headerLeftX = timerCenterX - (headerRowW / 2);
+        const headerRightX = timerCenterX + (headerRowW / 2);
+        const timeframeCountdownChipW = 46;
+        const timeframeCountdownChipH = 22;
+        const timeframeCountdownX = headerRightX - (timeframeCountdownChipW / 2);
+        const timeframeCountdownY = timerY0 + 12;
+
+        this.timeframeText = this.add.text(headerLeftX, timerY0 + 12, "AUTO", {
           fontFamily: "monospace",
           fontSize: "18px",
+          fontStyle: "bold",
+          color: "#111111",
+        }).setOrigin(0, 0.5).setDepth(1002);
+
+        this.timeframeCountdownChip = this.add.rectangle(
+          timeframeCountdownX,
+          timeframeCountdownY,
+          timeframeCountdownChipW,
+          timeframeCountdownChipH,
+          0xbbbbbb,
+          1
+        ).setDepth(1001);
+
+        this.timeframeCounterText = this.add.text(timeframeCountdownX, timerY0 + 12, "0:20", {
+          fontFamily: "monospace",
+          fontSize: "16px",
           fontStyle: "bold",
           color: "#111111",
         }).setOrigin(0.5, 0.5).setDepth(1002);
@@ -1641,6 +1705,7 @@
         // Initialize time display
         this.setTimeUI(MATCH_TIME_S);
         this.applyTimeframeForElapsedS(0);
+        this.setTimeframeCountdownUI(this.getTimeframeRemainingS(0));
 
         // Gamepad support
         this.input.gamepad.start();
@@ -1754,10 +1819,18 @@
 
       setTimeUI(remainingS) {
         if (!this.timeText) return;
-        const total = Math.max(0, Math.floor(remainingS));
+        const total = Math.max(0, Math.ceil(remainingS));
         const m = Math.floor(total / 60);
         const s = total % 60;
         this.timeText.setText(`${m}:${s.toString().padStart(2, "0")}`);
+      }
+
+      setTimeframeCountdownUI(remainingS) {
+        if (!this.timeframeCounterText) return;
+        const total = Math.max(0, Math.ceil(remainingS));
+        const m = Math.floor(total / 60);
+        const s = total % 60;
+        this.timeframeCounterText.setText(`${m}:${s.toString().padStart(2, "0")}`);
       }
 
       toggleRun() {
@@ -1792,51 +1865,29 @@
         return TIMEFRAMES.length - 1;
       }
 
-      applyTimeframeForElapsedS(elapsedS) {
-        const idx = this.getTimeframeIndex(elapsedS);
-        if (idx === this.currentTimeframeIndex) return;
-
-        const prev = this.currentTimeframeIndex;
-        this.currentTimeframeIndex = idx;
-
-        const tf = TIMEFRAMES[idx].name;
-        if (this.timeframeText) this.timeframeText.setText(tf);
-
-        // Decide autoLeader when leaving AUTO
-        if (prev !== -1 && TIMEFRAMES[prev].name === "AUTO" && tf !== "AUTO") {
-          const r = this.redRobot.state.score;
-          const b = this.blueRobot.state.score;
-          if (r > b) this.autoLeader = "RED";
-          else if (b > r) this.autoLeader = "BLUE";
-          else this.autoLeader = "TIE";
+      getTimeframeRemainingS(elapsedS) {
+        let t = elapsedS;
+        for (let i = 0; i < TIMEFRAMES.length; i++) {
+          const durationS = TIMEFRAMES[i].durationS;
+          if (t < durationS) return (durationS - t);
+          t -= durationS;
         }
+        return 0;
+      }
 
-        const setBoth = () => {
-          this.redHub.setActive(true);
-          this.blueHub.setActive(true);
-        };
-
+      getHubActivationForTimeframe(tf) {
         if (tf === "AUTO" || tf === "TRANSITION" || tf === "ENDGAME") {
-          setBoth();
-          return;
+          return {red: true, blue: true};
         }
 
         if (tf === "SHIFT1") {
-          if (this.autoLeader === "RED") {
-            this.redHub.setActive(true);
-            this.blueHub.setActive(false);
-          } else if (this.autoLeader === "BLUE") {
-            this.redHub.setActive(false);
-            this.blueHub.setActive(true);
-          } else {
-            setBoth();
-          }
-          return;
+          if (this.autoLeader === "RED") return {red: true, blue: false};
+          if (this.autoLeader === "BLUE") return {red: false, blue: true};
+          return {red: true, blue: true};
         }
 
         const shiftIndex = (tf === "SHIFT2") ? 0 : (tf === "SHIFT3") ? 1 : 2;
         let redActive;
-
         if (this.autoLeader === "RED") {
           redActive = (shiftIndex % 2 === 1);
         } else if (this.autoLeader === "BLUE") {
@@ -1845,8 +1896,60 @@
           redActive = (shiftIndex % 2 === 0);
         }
 
-        this.redHub.setActive(!!redActive);
-        this.blueHub.setActive(!redActive);
+        return {red: !!redActive, blue: !redActive};
+      }
+
+      updateHubTransitionWarning(nowMs, elapsedS) {
+        const idx = this.getTimeframeIndex(elapsedS);
+        const curr = TIMEFRAMES[idx]?.name;
+        const next = TIMEFRAMES[idx + 1]?.name;
+        const timeLeft = this.getTimeframeRemainingS(elapsedS);
+
+        if (curr === "ENDGAME") {
+          const endgameWarn = (timeLeft > 0 && timeLeft <= 3);
+          this.redHub.setFlashWarning(endgameWarn, nowMs);
+          this.blueHub.setFlashWarning(endgameWarn, nowMs);
+          return;
+        }
+
+        if (!curr || !next || timeLeft > 3) {
+          this.redHub.setFlashWarning(false, nowMs);
+          this.blueHub.setFlashWarning(false, nowMs);
+          return;
+        }
+
+        const currentActive = this.getHubActivationForTimeframe(curr);
+        const nextActive = this.getHubActivationForTimeframe(next);
+
+        const redWarning = currentActive.red && !nextActive.red;
+        const blueWarning = currentActive.blue && !nextActive.blue;
+
+        this.redHub.setFlashWarning(redWarning, nowMs);
+        this.blueHub.setFlashWarning(blueWarning, nowMs);
+      }
+
+      applyTimeframeForElapsedS(elapsedS) {
+        const idx = this.getTimeframeIndex(elapsedS);
+        if (idx === this.currentTimeframeIndex) return;
+
+        const prev = this.currentTimeframeIndex;
+        this.currentTimeframeIndex = idx;
+
+        const tf = TIMEFRAMES[idx].name;
+        if (this.timeframeText) this.timeframeText.setText(TIMEFRAME_DISPLAY_LABELS[tf] || tf);
+
+        // Decide autoLeader when leaving AUTO
+        if (prev !== -1 && TIMEFRAMES[prev].name === "AUTO" && tf !== "AUTO") {
+          const r = this.redRobot.state.score;
+          const b = this.blueRobot.state.score;
+          if (r > b) this.autoLeader = "RED";
+          else if (b > r) this.autoLeader = "BLUE";
+          else this.autoLeader = (Math.random() < 0.5) ? "RED" : "BLUE";
+        }
+
+        const active = this.getHubActivationForTimeframe(tf);
+        this.redHub.setActive(active.red);
+        this.blueHub.setActive(active.blue);
       }
 
       // -----------------------------
@@ -2047,6 +2150,7 @@
         // Reset timer UI
         this.setTimeUI(MATCH_TIME_S);
         this.applyTimeframeForElapsedS(0);
+        this.setTimeframeCountdownUI(this.getTimeframeRemainingS(0));
       }
 
       update(time, delta) {
@@ -2066,6 +2170,8 @@
 
         // Apply timeframe transitions
         this.applyTimeframeForElapsedS(activeElapsedS);
+        this.setTimeframeCountdownUI(this.getTimeframeRemainingS(activeElapsedS));
+        this.updateHubTransitionWarning(now, activeElapsedS);
 
         // Match end behavior
         if (remaining <= 0 && !this.matchOver) {
