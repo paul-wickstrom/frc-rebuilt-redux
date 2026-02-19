@@ -1342,7 +1342,12 @@
       }
 
       preload() {
-        this.load.image("rebuiltLogo", "RebuiltReduxLogo.jpeg");
+        this.load.image("rebuiltLogo", "assets/RebuiltReduxLogo.jpeg");
+        this.load.audio("matchStart", "assets/audio/match/matchStart.wav");
+        this.load.audio("matchEnd", "assets/audio/match/matchEnd.wav");
+        this.load.audio("matchResume", "assets/audio/match/matchResume.wav");
+        this.load.audio("matchShiftChange", "assets/audio/match/matchShiftChange.wav");
+        this.load.audio("matchWarningSonar", "assets/audio/match/matchWarningSonar.wav");
       }
 
       create() {
@@ -1373,8 +1378,14 @@
 
         // Pause/run state
         this.isRunning = false;
+        this.hasMatchStarted = false;
         this.pausedTotalMs = 0;
         this.pauseStartMs = null;
+
+        // Sound one-shot state
+        this.lastPlayedTimeframeName = null;
+        this.lastPlayedTransitionWarningFor = null;
+        this.hasPlayedMatchEndSound = false;
 
         // Timeframe state
         this.currentTimeframeIndex = -1;
@@ -1873,6 +1884,19 @@
         this.timeframeCounterText.setText(`${m}:${s.toString().padStart(2, "0")}`);
       }
 
+      playMatchSound(key) {
+        if (!this.sound) return;
+        if (this.sound.locked) {
+          const onceUnlocked = () => {
+            this.sound.off("unlocked", onceUnlocked);
+            this.sound.play(key);
+          };
+          this.sound.on("unlocked", onceUnlocked);
+          return;
+        }
+        this.sound.play(key);
+      }
+
       toggleRun() {
         if (this.matchOver) return;
 
@@ -1890,6 +1914,10 @@
           }
           this.matter.world.resume();
           if (this.toggleBtnText) this.toggleBtnText.setText("Stop");
+          if (!this.hasMatchStarted) {
+            this.hasMatchStarted = true;
+            this.playMatchSound("matchStart");
+          }
         }
       }
 
@@ -1966,6 +1994,14 @@
 
         this.redHub.setFlashWarning(redWarning, nowMs);
         this.blueHub.setFlashWarning(blueWarning, nowMs);
+
+        // Play a single shift cue in the final 1 second before a normal timeframe transition,
+        // but skip the AUTO->TRANSITION boundary.
+        if (curr !== "AUTO" && curr !== "SHIFT4" &&
+          timeLeft > 0 && timeLeft <= 1 && this.lastPlayedTransitionWarningFor !== curr) {
+          this.playMatchSound("matchShiftChange");
+          this.lastPlayedTransitionWarningFor = curr;
+        }
       }
 
       applyTimeframeForElapsedS(elapsedS) {
@@ -1973,6 +2009,7 @@
         if (idx === this.currentTimeframeIndex) return;
 
         const prev = this.currentTimeframeIndex;
+        const prevName = (prev >= 0) ? TIMEFRAMES[prev].name : null;
         this.currentTimeframeIndex = idx;
 
         const tf = TIMEFRAMES[idx].name;
@@ -1990,6 +2027,14 @@
         const active = this.getHubActivationForTimeframe(tf);
         this.redHub.setActive(active.red);
         this.blueHub.setActive(active.blue);
+
+        // Match sounds aligned to FRC-style transitions.
+        if (prevName === "AUTO" && tf === "TRANSITION") {
+          this.playMatchSound("matchResume");
+        } else if (tf === "ENDGAME" && this.lastPlayedTimeframeName !== "ENDGAME") {
+          this.playMatchSound("matchWarningSonar");
+        }
+        this.lastPlayedTimeframeName = tf;
       }
 
       // -----------------------------
@@ -2160,10 +2205,15 @@
 
         // Reset to PAUSED
         this.isRunning = false;
+        this.hasMatchStarted = false;
         this.pausedTotalMs = 0;
         this.pauseStartMs = Date.now();
         this.matter.world.pause();
         if (this.toggleBtnText) this.toggleBtnText.setText("Start");
+
+        this.lastPlayedTimeframeName = null;
+        this.lastPlayedTransitionWarningFor = null;
+        this.hasPlayedMatchEndSound = false;
 
         // Reset timeframe state
         this.currentTimeframeIndex = -1;
@@ -2219,6 +2269,10 @@
           this.isRunning = false;
           this.matter.world.pause();
           if (this.toggleBtnText) this.toggleBtnText.setText("Start");
+          if (!this.hasPlayedMatchEndSound) {
+            this.hasPlayedMatchEndSound = true;
+            this.playMatchSound("matchEnd");
+          }
         }
 
         this.setTimeUI(remaining);
