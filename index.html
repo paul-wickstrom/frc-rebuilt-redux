@@ -132,6 +132,7 @@
               <option value="human">Gamepad/KB</option>
               <option value="cursor">Cursor</option>
               <option value="fuelSeeker">Auto Fuel Seeker</option>
+              <option value="adaptiveHub">Auto Adaptive Hub</option>
             </select>
           </label>
           <span id="redKbHint" class="hint"></span>
@@ -145,6 +146,7 @@
               <option value="human">Gamepad/KB</option>
               <option value="cursor">Cursor</option>
               <option value="fuelSeeker">Auto Fuel Seeker</option>
+              <option value="adaptiveHub">Auto Adaptive Hub</option>
             </select>
           </label>
           <span id="blueKbHint" class="hint"></span>
@@ -1113,8 +1115,8 @@
 
       getAllianceReentryPoint(alliance, yHint) {
         const y = Phaser.Math.Clamp(yHint, 24, FIELD_H - 24);
-        if (alliance === "Blue") return {x: BLUE_LINE_X + 40, y};
-        return {x: RED_LINE_X - 40, y};
+        if (alliance === "Blue") return {x: BLUE_LINE_X + 70, y};
+        return {x: RED_LINE_X - 70, y};
       }
 
       getNeutralAnchor(yHint) {
@@ -1163,6 +1165,22 @@
     class FuelSeekerController extends AutoBaseController {
       constructor(alliance /* "Blue" | "Red" */) {
         super(alliance);
+        this.unloading = false;
+        this.unloadExitCount = 3;
+        this.hubShootStandoffDist = 72;
+        this.hubShootLateralClamp = 96;
+      }
+
+      getHubShootPoint(robot, hubPoint) {
+        const dir = (this.alliance === "Blue") ? 1 : -1;
+        const x = hubPoint.x + (dir * this.hubShootStandoffDist);
+        const yOffset = Phaser.Math.Clamp(
+          robot.body.position.y - hubPoint.y,
+          -this.hubShootLateralClamp,
+          this.hubShootLateralClamp
+        );
+        const y = Phaser.Math.Clamp(hubPoint.y + yOffset, 24, FIELD_H - 24);
+        return {x, y};
       }
 
       getCommands(scene, robot, delta) {
@@ -1185,6 +1203,7 @@
         const currentZoneId = scene.getZoneForX(robot.body.position.x).id;
         const hub = (this.alliance === "Blue") ? scene.blueHub : scene.redHub;
         const hubPoint = scene.getAllianceHubPoint(this.alliance);
+        const hubShootPoint = this.getHubShootPoint(robot, hubPoint);
 
         const allianceFuelCount = this.countGroundFuelInZone(scene, allianceZoneId);
         const neutralFuelCount = this.countGroundFuelInZone(scene, ZoneId.NEUTRAL);
@@ -1194,6 +1213,23 @@
         // - Prefer alliance-zone fuel and score from alliance zone.
         // - If alliance is dry, load in neutral then return alliance to score.
         if (hub.active) {
+          // Sticky unload run: once we commit a full load to scoring, keep unloading
+          // until mostly empty to prevent line-bounce oscillation.
+          if (fuelCount >= MAX_STORAGE) this.unloading = true;
+          if (this.unloading && fuelCount <= this.unloadExitCount) this.unloading = false;
+
+          if (this.unloading) {
+            if (currentZoneId !== allianceZoneId) {
+              const reentry = this.getAllianceReentryPoint(this.alliance, robot.body.position.y);
+              const move = this.driveTo(robot, reentry.x, reentry.y);
+              cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+              return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+            }
+            const move = this.driveTo(robot, hubShootPoint.x, hubShootPoint.y);
+            cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: fuelCount > 0};
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
           if (allianceFuelCount > 0) {
             if (currentZoneId !== allianceZoneId) {
               const reentry = this.getAllianceReentryPoint(this.alliance, robot.body.position.y);
@@ -1227,7 +1263,7 @@
             }
 
             if (fuelCount > 0) {
-              const move = this.driveTo(robot, hubPoint.x, hubPoint.y);
+              const move = this.driveTo(robot, hubShootPoint.x, hubShootPoint.y);
               cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: true};
               return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
             }
@@ -1243,7 +1279,7 @@
               cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
               return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
             }
-            const move = this.driveTo(robot, hubPoint.x, hubPoint.y);
+            const move = this.driveTo(robot, hubShootPoint.x, hubShootPoint.y);
             cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot: fuelCount > 0};
             return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
           }
@@ -1322,6 +1358,150 @@
         return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
       }
     } // end of FuelSeekerController
+
+    // -----------------------------
+    // ADAPTIVE HUB CONTROLLER
+    // Goal:
+    // - Hub active: score aggressively (FuelSeeker behavior).
+    // - Hub inactive: raid opponent-zone fuel while avoiding robot contact.
+    // -----------------------------
+    class AdaptiveHubController extends AutoBaseController {
+      constructor(alliance /* "Blue" | "Red" */) {
+        super(alliance);
+        this.scorer = new FuelSeekerController(alliance);
+        this.maxSpeed = ROBOT_SPEED * 0.95;
+        this.arriveDist = 18;
+        this.avoidSoftDist = ROBOT_W * 2.1;
+        this.avoidHardDist = ROBOT_W * 1.2;
+        this.avoidGain = 0.85;
+      }
+
+      getOpponentRobot(scene, robot) {
+        return (robot.name === "Red") ? scene.blueRobot : scene.redRobot;
+      }
+
+      getOpponentZoneId() {
+        return (this.alliance === "Blue") ? ZoneId.RED : ZoneId.BLUE;
+      }
+
+      getOpponentZoneAnchor(yHint) {
+        const y = Phaser.Math.Clamp(yHint, 28, FIELD_H - 28);
+        if (this.alliance === "Blue") return {x: RED_LINE_X - 40, y};
+        return {x: BLUE_LINE_X + 40, y};
+      }
+
+      applySeparation(robot, opponent, cmd) {
+        if (!opponent?.body) return cmd;
+
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const ox = opponent.body.position.x;
+        const oy = opponent.body.position.y;
+        const dx = rx - ox;
+        const dy = ry - oy;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist >= this.avoidSoftDist) return cmd;
+
+        const nx = dx / Math.max(1e-6, dist);
+        const ny = dy / Math.max(1e-6, dist);
+
+        if (dist < this.avoidHardDist) {
+          return {
+            vx: nx * this.maxSpeed,
+            vy: ny * this.maxSpeed,
+            omega: cmd.omega,
+            shoot: cmd.shoot
+          };
+        }
+
+        const t = Phaser.Math.Clamp((this.avoidSoftDist - dist) / (this.avoidSoftDist - this.avoidHardDist), 0, 1);
+        const repelScale = this.maxSpeed * this.avoidGain * t;
+        const vx = cmd.vx + (nx * repelScale);
+        const vy = cmd.vy + (ny * repelScale);
+
+        const mag = Math.hypot(vx, vy);
+        const speedScale = (mag > this.maxSpeed) ? (this.maxSpeed / mag) : 1;
+        return {
+          vx: vx * speedScale,
+          vy: vy * speedScale,
+          omega: cmd.omega,
+          shoot: cmd.shoot
+        };
+      }
+
+      getDefenseCommands(scene, robot, delta) {
+        const dtMs = Math.max(1, delta || 16.7);
+        const fuelCount = robot.state?.fuelStore?.length ?? 0;
+        const opponent = this.getOpponentRobot(scene, robot);
+
+        if (this.unstuckMsRemaining > 0) {
+          this.unstuckMsRemaining -= dtMs;
+          this.lastPos = {x: robot.body.position.x, y: robot.body.position.y};
+          const cmd = {
+            vx: this.unstuckCmd.vx,
+            vy: this.unstuckCmd.vy,
+            omega: this.unstuckCmd.omega,
+            shoot: fuelCount > 0
+          };
+          return this.applySeparation(robot, opponent, cmd);
+        }
+
+        const opponentZoneId = this.getOpponentZoneId();
+        const currentZoneId = scene.getZoneForX(robot.body.position.x).id;
+        const shoot = fuelCount > 0;
+        let cmd = {vx: 0, vy: 0, omega: 0, shoot};
+
+        if (currentZoneId !== opponentZoneId) {
+          const anchor = this.getOpponentZoneAnchor(robot.body.position.y);
+          const move = this.driveTo(robot, anchor.x, anchor.y);
+          cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot};
+          cmd = this.applySeparation(robot, opponent, cmd);
+          return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+        }
+
+        const nearestOpponentFuel = this.findNearestGroundFuelInZone(
+          scene,
+          opponentZoneId,
+          robot.body.position.x,
+          robot.body.position.y
+        );
+
+        if (nearestOpponentFuel) {
+          const dist = Phaser.Math.Distance.Between(
+            robot.body.position.x, robot.body.position.y,
+            nearestOpponentFuel.body.position.x, nearestOpponentFuel.body.position.y
+          );
+
+          if (dist <= this.pickupDist) {
+            cmd = {vx: 0, vy: 0, omega: 0, shoot};
+            cmd = this.applySeparation(robot, opponent, cmd);
+            return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+          }
+
+          const move = this.driveTo(robot, nearestOpponentFuel.body.position.x, nearestOpponentFuel.body.position.y);
+          cmd = {vx: move.vx, vy: move.vy, omega: move.omega, shoot};
+          cmd = this.applySeparation(robot, opponent, cmd);
+          return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+        }
+
+        // No target fuel visible in opponent zone: hold a safe raiding lane.
+        const hold = this.getOpponentZoneAnchor(FIELD_H / 2);
+        const holdMove = this.driveTo(robot, hold.x, hold.y);
+        cmd = {vx: holdMove.vx, vy: holdMove.vy, omega: holdMove.omega, shoot};
+        cmd = this.applySeparation(robot, opponent, cmd);
+        return this.applyAntiStuck(robot, cmd, dtMs, fuelCount);
+      }
+
+      getCommands(scene, robot, delta) {
+        if (scene.matchOver) return {vx: 0, vy: 0, omega: 0, shoot: false};
+        const hub = (this.alliance === "Blue") ? scene.blueHub : scene.redHub;
+        if (hub.active) {
+          return this.scorer.getCommands(scene, robot, delta);
+        }
+        return this.getDefenseCommands(scene, robot, delta);
+      }
+    } // end of AdaptiveHubController
 
     // -----------------------------
     // MAIN SCENE
@@ -1795,6 +1975,8 @@
               return new CursorController();
             case "fuelSeeker":
               return new FuelSeekerController(robot.name);
+            case "adaptiveHub":
+              return new AdaptiveHubController(robot.name);
             case "human":
             default:
               return new HumanController();
