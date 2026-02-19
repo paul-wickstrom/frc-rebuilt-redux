@@ -2004,9 +2004,9 @@
           updateHint(robot, hintEl, value);
         };
 
-        // Defaults (match your current expectation)
-        redSel.value = "cursor";
-        blueSel.value = "fuelSeeker";
+        // Defaults
+        redSel.value = "human";
+        blueSel.value = "human";
 
         // Wire events
         redSel.addEventListener("change", () => apply(this.redRobot, redSel, redHint));
