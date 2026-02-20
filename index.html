@@ -69,7 +69,7 @@
       /* centers items vertically */
       justify-content: center;
       /* centers within each half (zone) */
-      gap: 10px;
+      gap: 6px;
       height: 100%;
     }
 
@@ -96,12 +96,17 @@
       color: #7cc7ff;
     }
 
-    #controlBar label {
+    .ctrlTop {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      opacity: 0.95;
+      gap: 6px;
+    }
+
+    .ctrlSelectCol {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 5px;
     }
 
     #controlBar select {
@@ -113,9 +118,12 @@
     }
 
     .hint {
+      display: block;
       font-size: 12px;
       opacity: 0.75;
       white-space: nowrap;
+      min-height: 12px;
+      text-align: right;
     }
   </style>
 </head>
@@ -125,37 +133,44 @@
     <div id="gameContainer">
       <div id="controlBar">
         <div class="ctrlRow leftHalf">
-          <span class="team red">Red</span>
-          <label>
-            Controller
-            <select id="redControllerSelect">
-              <option value="human">Gamepad/KB</option>
-              <option value="cursor">Cursor</option>
-              <option value="fuelSeeker">Auto Fuel Seeker</option>
-              <option value="adaptiveHub">Auto Adaptive Hub</option>
-            </select>
-          </label>
-          <span id="redKbHint" class="hint"></span>
+          <div class="ctrlTop">
+            <span class="team red">Red</span>
+            <div class="ctrlSelectCol">
+              <label>
+                <select id="redControllerSelect" aria-label="Red controller">
+                  <option value="human">Gamepad/KB</option>
+                  <option value="cursor">Cursor</option>
+                  <option value="fuelSeeker">Auto Fuel Seeker</option>
+                  <option value="adaptiveHub">Auto Adaptive Hub</option>
+                </select>
+              </label>
+              <span id="redKbHint" class="hint"></span>
+            </div>
+          </div>
         </div>
 
         <div class="ctrlRow rightHalf">
-          <span class="team blue">Blue</span>
-          <label>
-            Controller
-            <select id="blueControllerSelect">
-              <option value="human">Gamepad/KB</option>
-              <option value="cursor">Cursor</option>
-              <option value="fuelSeeker">Auto Fuel Seeker</option>
-              <option value="adaptiveHub">Auto Adaptive Hub</option>
-            </select>
-          </label>
-          <span id="blueKbHint" class="hint"></span>
+          <div class="ctrlTop">
+            <span class="team blue">Blue</span>
+            <div class="ctrlSelectCol">
+              <label>
+                <select id="blueControllerSelect" aria-label="Blue controller">
+                  <option value="human">Gamepad/KB</option>
+                  <option value="cursor">Cursor</option>
+                  <option value="fuelSeeker">Auto Fuel Seeker</option>
+                  <option value="adaptiveHub">Auto Adaptive Hub</option>
+                </select>
+              </label>
+              <span id="blueKbHint" class="hint"></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.js"></script>
+  <script src="src/victoryReveal.js"></script>
   <script>
     // -----------------------------
     // SCALE + FIELD
@@ -1525,6 +1540,7 @@
         this.load.image("rebuiltLogo", "assets/RebuiltReduxLogo.jpeg");
         this.load.audio("matchStart", "assets/audio/match/matchStart.wav");
         this.load.audio("matchEnd", "assets/audio/match/matchEnd.wav");
+        this.load.audio("matchResult", "assets/audio/match/matchResult.wav");
         this.load.audio("matchResume", "assets/audio/match/matchResume.wav");
         this.load.audio("matchShiftChange", "assets/audio/match/matchShiftChange.wav");
         this.load.audio("matchWarningSonar", "assets/audio/match/matchWarningSonar.wav");
@@ -1555,6 +1571,7 @@
         // Match state
         this.matchStartMs = Date.now();
         this.matchOver = false;
+        this.victoryReveal = null;
 
         // Pause/run state
         this.isRunning = false;
@@ -1566,6 +1583,7 @@
         this.lastPlayedTimeframeName = null;
         this.lastPlayedTransitionWarningFor = null;
         this.hasPlayedMatchEndSound = false;
+        this.hasPlayedMatchResultSound = false;
 
         // Timeframe state
         this.currentTimeframeIndex = -1;
@@ -1820,6 +1838,7 @@
 
         // Preload fuel as real Fuel objects in master list, but stashed in robots
         this.preloadRobotFuel();
+        this.victoryReveal = new VictoryRevealController(this, {durationMs: 5000});
 
         // Collision scoring: hex sensors
         const isBlueSensor = (x) => x && (x.isBlueHubSensor || (x.parent && x.parent.isBlueHubSensor));
@@ -1982,8 +2001,6 @@
               return new HumanController();
           }
         };
-        `RED: WASD/QE + Space   BLUE: IJKL/UO + Enter   Reset: R`
-
         const updateHint = (robot, hintEl, value) => {
           if (!hintEl) return;
 
@@ -2396,6 +2413,7 @@
         this.lastPlayedTimeframeName = null;
         this.lastPlayedTransitionWarningFor = null;
         this.hasPlayedMatchEndSound = false;
+        this.hasPlayedMatchResultSound = false;
 
         // Reset timeframe state
         this.currentTimeframeIndex = -1;
@@ -2415,6 +2433,7 @@
         // Reset poses
         this.blueRobot.setPose(this.getRobotStartPoseForAlliance("Blue"));
         this.redRobot.setPose(this.getRobotStartPoseForAlliance("Red"));
+        if (this.victoryReveal) this.victoryReveal.reset();
 
         // Preload fuel again as real objects in master list (stashed)
         this.preloadRobotFuel();
@@ -2455,6 +2474,11 @@
             this.hasPlayedMatchEndSound = true;
             this.playMatchSound("matchEnd");
           }
+          if (!this.hasPlayedMatchResultSound) {
+            this.hasPlayedMatchResultSound = true;
+            this.time.delayedCall(850, () => this.playMatchSound("matchResult"));
+          }
+          if (this.victoryReveal) this.victoryReveal.start(this.getMatchOutcome(), now);
         }
 
         this.setTimeUI(remaining);
@@ -2470,6 +2494,7 @@
 
           if (this.redScoreText) this.redScoreText.setText(`${this.redRobot.state.score}`);
           if (this.blueScoreText) this.blueScoreText.setText(`${this.blueRobot.state.score}`);
+          if (this.victoryReveal) this.victoryReveal.update(now);
           return;
         }
 
@@ -2563,6 +2588,14 @@
 
         // Last-resort fallback (won’t be correct for your field, but prevents crashes)
         return {x: FIELD_W * 0.5, y: FIELD_H * 0.5};
+      }
+
+      getMatchOutcome() {
+        const r = this.redRobot?.state?.score ?? 0;
+        const b = this.blueRobot?.state?.score ?? 0;
+        if (r > b) return "RED";
+        if (b > r) return "BLUE";
+        return "TIE";
       }
 
     }  // end of MainScene
