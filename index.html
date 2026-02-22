@@ -1065,9 +1065,72 @@
         this.unstuckSpeedMin = ROBOT_SPEED * 0.75;
         this.unstuckSpeedMax = ROBOT_SPEED * 1.05;
 
+        // Hub avoidance (center-to-center distances).
+        const hubHalfDiag = Math.hypot(HUB_W / 2, HUB_H / 2);
+        const robotHalfDiag = Math.hypot(ROBOT_W / 2, ROBOT_H / 2);
+        this.hubAvoidHardDist = hubHalfDiag + robotHalfDiag + 8;
+        this.hubAvoidSoftDist = this.hubAvoidHardDist + 26;
+        this.hubAvoidGain = 1.05;
+        this.hubTargetRelaxDist = this.hubAvoidSoftDist;
+        this.opponentHubAvoidGain = 1.0;
+        this.opponentHubAvoidSoftExtra = 0;
+
+      }
+
+      getHubAvoidance(scene, robot, tx, ty) {
+        if (!scene?.redHub?.center || !scene?.blueHub?.center) {
+          return {vx: 0, vy: 0};
+        }
+
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        let avx = 0;
+        let avy = 0;
+
+        const ownHubCenter = (this.alliance === "Blue") ? scene.blueHub.center : scene.redHub.center;
+        const hubs = [scene.redHub.center, scene.blueHub.center];
+        for (const hub of hubs) {
+          const isOwnHub = (hub === ownHubCenter);
+          const opponentSoftExtra = isOwnHub ? 0 : this.opponentHubAvoidSoftExtra;
+          const softDist = this.hubAvoidSoftDist + opponentSoftExtra;
+
+          const awayX = rx - hub.x;
+          const awayY = ry - hub.y;
+          const dist = Math.hypot(awayX, awayY);
+          if (dist >= softDist) continue;
+
+          const nx = awayX / Math.max(1e-6, dist);
+          const ny = awayY / Math.max(1e-6, dist);
+
+          // Relax repel only for our own hub so scoring runs can still settle in.
+          const targetDist = Math.hypot(tx - hub.x, ty - hub.y);
+          const nearTarget = isOwnHub && (targetDist < this.hubTargetRelaxDist);
+          const relax = nearTarget ? 0.35 : 1.0;
+          const hardBase = this.hubAvoidHardDist + (opponentSoftExtra * 0.5);
+          const hardDist = nearTarget ? (hardBase * 0.85) : hardBase;
+          const hubGain = isOwnHub ? 1.0 : this.opponentHubAvoidGain;
+
+          if (dist < hardDist) {
+            avx += nx * this.maxSpeed * relax * hubGain;
+            avy += ny * this.maxSpeed * relax * hubGain;
+            continue;
+          }
+
+          const t = Phaser.Math.Clamp(
+            (softDist - dist) / Math.max(1e-6, softDist - hardDist),
+            0,
+            1
+          );
+          const repelScale = this.maxSpeed * this.hubAvoidGain * hubGain * t * relax;
+          avx += nx * repelScale;
+          avy += ny * repelScale;
+        }
+
+        return {vx: avx, vy: avy};
       }
 
       driveTo(robot, tx, ty) {
+        const scene = robot.scene;
         const rx = robot.body.position.x;
         const ry = robot.body.position.y;
         const dx = tx - rx;
@@ -1078,10 +1141,15 @@
 
         const nx = dx / Math.max(1e-6, dist);
         const ny = dy / Math.max(1e-6, dist);
-        const vx = nx * this.maxSpeed;
-        const vy = ny * this.maxSpeed;
+        const avoid = this.getHubAvoidance(scene, robot, tx, ty);
+        const vxRaw = (nx * this.maxSpeed) + avoid.vx;
+        const vyRaw = (ny * this.maxSpeed) + avoid.vy;
+        const mag = Math.hypot(vxRaw, vyRaw);
+        const speedScale = (mag > this.maxSpeed) ? (this.maxSpeed / mag) : 1;
+        const vx = vxRaw * speedScale;
+        const vy = vyRaw * speedScale;
 
-        const travelHeading = Math.atan2(dy, dx);
+        const travelHeading = (mag > 1e-6) ? Math.atan2(vy, vx) : Math.atan2(dy, dx);
         const desiredBodyAng = travelHeading - FORWARD_OFFSET;
         const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
         const omega = Phaser.Math.Clamp(err * this.kTurn, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
@@ -1386,6 +1454,8 @@
         this.scorer = new FuelSeekerController(alliance);
         this.maxSpeed = ROBOT_SPEED * 0.95;
         this.arriveDist = 18;
+        this.opponentHubAvoidGain = 1.35;
+        this.opponentHubAvoidSoftExtra = 18;
         this.avoidSoftDist = ROBOT_W * 2.1;
         this.avoidHardDist = ROBOT_W * 1.2;
         this.avoidGain = 0.85;
