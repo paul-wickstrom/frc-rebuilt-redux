@@ -170,7 +170,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.js"></script>
-  <script src="src/victoryReveal.js"></script>
+  <script src="src/victoryReveal.js?v=20260222d"></script>
   <script>
     // -----------------------------
     // SCALE + FIELD
@@ -1560,7 +1560,7 @@
           .setOrigin(0.5)
           .setDepth(-999)   // above carpet, below all gameplay/UI
           .setAlpha(0.12)  // optional: make it look printed, not a sticker
-          .setScale(0.20);
+          .setScale(HUB_H / this.textures.get("rebuiltLogo").getSourceImage().height);
 
         // Sleep config
         const engine = this.matter.world.engine;

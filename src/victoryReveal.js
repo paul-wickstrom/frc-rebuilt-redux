@@ -6,6 +6,9 @@
       this.started = false;
       this.outcome = "TIE";
       this.startMs = 0;
+      this.centerBannerBg = null;
+      this.centerBannerText = null;
+      this.centerBannerTween = null;
       this.visuals = {
         Red: this.createVisualSet(),
         Blue: this.createVisualSet(),
@@ -15,8 +18,6 @@
     createVisualSet() {
       return {
         ring: null,
-        bannerBg: null,
-        bannerText: null,
         active: false,
         style: null,
         text: "",
@@ -30,20 +31,6 @@
 
       if (!v.ring) {
         v.ring = this.scene.add.graphics().setDepth(35).setVisible(false);
-      }
-      if (!v.bannerBg) {
-        v.bannerBg = this.scene.add.rectangle(0, 0, 220, 44, 0x000000, 0.85)
-          .setStrokeStyle(2, 0xffffff, 1)
-          .setDepth(36)
-          .setVisible(false);
-      }
-      if (!v.bannerText) {
-        v.bannerText = this.scene.add.text(0, 0, "", {
-          fontFamily: "monospace",
-          fontSize: "24px",
-          fontStyle: "bold",
-          color: "#ffffff",
-        }).setOrigin(0.5, 0.5).setDepth(37).setVisible(false);
       }
 
       return v;
@@ -61,21 +48,21 @@
         bannerBg: 0x650909,
         bannerStroke: 0xff9a9a,
         bannerColor: "#ffe2e2",
-        text: "RED WINS",
+        text: "RED WINS!",
       };
       const blueWin = {
         ring: 0x4ea1ff,
         bannerBg: 0x0a2955,
         bannerStroke: 0x9fd0ff,
         bannerColor: "#e6f3ff",
-        text: "BLUE WINS",
+        text: "BLUE WINS!",
       };
       const tie = {
         ring: 0xffde76,
         bannerBg: 0x3a3a3a,
         bannerStroke: 0xffde76,
         bannerColor: "#fff5d0",
-        text: "TIE GAME",
+        text: "MATCH TIED!",
       };
 
       if (outcome === "TIE") return tie;
@@ -93,8 +80,67 @@
 
       this.activateRobot("Red");
       this.activateRobot("Blue");
+      this.showCenterBanner();
       this.scatterFuelOffLogo();
       this.update(this.startMs);
+    }
+
+    ensureCenterBanner() {
+      if (!this.centerBannerBg) {
+        this.centerBannerBg = this.scene.add.rectangle(0, 0, 360, 58, 0x000000, 0.9)
+          .setStrokeStyle(2, 0xffffff, 1)
+          .setDepth(36)
+          .setVisible(false)
+          .setScale(1, 1);
+      }
+      if (!this.centerBannerText) {
+        this.centerBannerText = this.scene.add.text(0, 0, "", {
+          fontFamily: "monospace",
+          fontSize: "28px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(37).setVisible(false).setScale(1, 1);
+      }
+    }
+
+    positionCenterBanner() {
+      if (!this.centerBannerBg || !this.centerBannerText) return;
+
+      const logo = this.scene.fieldLogo;
+      const cx = logo ? logo.x : ((this.scene.fieldRect && this.scene.fieldRect.x) || (this.scene.scale.width * 0.5));
+      const cy = logo ? logo.y : ((this.scene.fieldRect && this.scene.fieldRect.y) || (this.scene.scale.height * 0.5));
+      const logoHalfH = (logo && logo.displayHeight ? logo.displayHeight : 0) * 0.5;
+      const gapPx = 24;
+      const logoW = (logo && logo.displayWidth) ? logo.displayWidth : 360;
+      this.centerBannerBg.setSize(logoW, this.centerBannerBg.height);
+      const bannerY = cy + logoHalfH + gapPx + (this.centerBannerBg.height * 0.5);
+
+      this.centerBannerBg.setPosition(cx, bannerY);
+      this.centerBannerText.setPosition(cx, bannerY + 0.5);
+    }
+
+    showCenterBanner() {
+      this.ensureCenterBanner();
+
+      const style = this.getStyleFor("Red", this.outcome) || this.getStyleFor("Blue", this.outcome);
+      if (!style) return;
+
+      this.centerBannerBg.setFillStyle(style.bannerBg, 0.9);
+      this.centerBannerBg.setStrokeStyle(2, style.bannerStroke, 1);
+      this.centerBannerText.setText(style.text).setColor(style.bannerColor);
+
+      this.positionCenterBanner();
+
+      this.centerBannerBg.setVisible(true).setScale(0.05, 1);
+      this.centerBannerText.setVisible(true).setScale(0.05, 1);
+
+      if (this.centerBannerTween) this.centerBannerTween.remove();
+      this.centerBannerTween = this.scene.tweens.add({
+        targets: [this.centerBannerBg, this.centerBannerText],
+        scaleX: 1,
+        duration: 1200,
+        ease: "Cubic.Out",
+      });
     }
 
     scatterFuelOffLogo() {
@@ -105,6 +151,13 @@
       const logo = scene.fieldLogo;
       const logoCx = logo ? logo.x : ((scene.fieldRect && scene.fieldRect.x) || (scene.scale.width * 0.5));
       const logoCy = logo ? logo.y : ((scene.fieldRect && scene.fieldRect.y) || (scene.scale.height * 0.5));
+      const logoHalfH = (logo && logo.displayHeight ? logo.displayHeight : 0) * 0.5;
+      const messageGapPx = 24;
+      const messageH = this.centerBannerBg ? this.centerBannerBg.height : 58;
+      const messageCx = logoCx;
+      const messageCy = logoCy + logoHalfH + messageGapPx + (messageH * 0.5);
+      const blastSourceX = messageCx;
+      const blastSourceY = messageCy + (messageH * 0.5) + 24;
 
       const logoRx = Math.max(60, ((logo && logo.displayWidth) || 220) * 0.55);
       const logoRy = Math.max(40, ((logo && logo.displayHeight) || 140) * 0.55);
@@ -128,16 +181,27 @@
 
         if (!insideLogo) continue;
 
-        let nx = dx;
-        let ny = dy;
-        const mag = Math.hypot(nx, ny);
-        if (mag < 0.001) {
-          const a = Math.random() * Math.PI * 2;
-          nx = Math.cos(a);
-          ny = Math.sin(a);
+        // Omnidirectional blast: full 360-degree random vector
+        // with a light push away from below-message source.
+        const a = Math.random() * Math.PI * 2;
+        const rx = Math.cos(a);
+        const ry = Math.sin(a);
+
+        const bx = x - blastSourceX;
+        const by = y - blastSourceY;
+        const bMag = Math.hypot(bx, by);
+        const ux = (bMag > 0.001) ? (bx / bMag) : 0;
+        const uy = (bMag > 0.001) ? (by / bMag) : -1;
+
+        let nx = (0.72 * rx) + (0.28 * ux);
+        let ny = (0.72 * ry) + (0.28 * uy);
+        const nMag = Math.hypot(nx, ny);
+        if (nMag > 0.001) {
+          nx /= nMag;
+          ny /= nMag;
         } else {
-          nx /= mag;
-          ny /= mag;
+          nx = rx;
+          ny = ry;
         }
 
         const pushDist = 180 + Math.random() * 180;
@@ -193,13 +257,7 @@
         return;
       }
 
-      v.bannerBg.setFillStyle(style.bannerBg, 0.9);
-      v.bannerBg.setStrokeStyle(2, style.bannerStroke, 1);
-      v.bannerText.setText(v.text).setColor(style.bannerColor);
-
       v.ring.setVisible(true);
-      v.bannerBg.setVisible(true);
-      v.bannerText.setVisible(true);
     }
 
     hideRobot(robotName) {
@@ -209,8 +267,6 @@
         v.ring.clear();
         v.ring.setVisible(false);
       }
-      if (v.bannerBg) v.bannerBg.setVisible(false);
-      if (v.bannerText) v.bannerText.setVisible(false);
       v.active = false;
     }
 
@@ -223,6 +279,7 @@
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * pulseSpeed);
       const holdStatic = elapsed > this.durationMs;
 
+      this.positionCenterBanner();
       this.updateRobot("Red", pulse, holdStatic);
       this.updateRobot("Blue", pulse, holdStatic);
     }
@@ -243,16 +300,23 @@
       v.ring.strokeCircle(x, y, 42);
       v.ring.lineStyle(1.5, v.style.ring, Math.min(1, alpha + 0.15));
       v.ring.strokeCircle(x, y, 49);
-
-      const bannerY = y + 82;
-      v.bannerBg.setPosition(x, bannerY);
-      v.bannerText.setPosition(x, bannerY + 0.5);
     }
 
     reset() {
       this.started = false;
       this.outcome = "TIE";
       this.startMs = 0;
+
+      if (this.centerBannerTween) {
+        this.centerBannerTween.remove();
+        this.centerBannerTween = null;
+      }
+      if (this.centerBannerBg) {
+        this.centerBannerBg.setVisible(false).setScale(1, 1);
+      }
+      if (this.centerBannerText) {
+        this.centerBannerText.setVisible(false).setScale(1, 1);
+      }
 
       this.hideRobot("Red");
       this.hideRobot("Blue");
