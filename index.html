@@ -77,26 +77,33 @@
     }
 
     /* Helps text/select baselines not sag */
-    #controlBar label,
     #controlBar select,
-    .team,
+    .teamBadge,
     .hint {
       line-height: 1;
     }
 
-    .team {
+    .teamBadge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
       font-weight: 700;
-      padding: 2px 8px;
-      border-radius: 8px;
-      border: 1px solid #333;
+      color: #ffffff;
+      min-width: 210px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(0, 0, 0, 0.45);
+      box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+      text-align: center;
     }
 
-    .team.red {
-      color: #ff8a8a;
+    .teamBadge.red {
+      background: linear-gradient(180deg, #ff3e3e 0%, #d11919 100%);
     }
 
-    .team.blue {
-      color: #7cc7ff;
+    .teamBadge.blue {
+      background: linear-gradient(180deg, #2f8df7 0%, #1262c6 100%);
     }
 
     .ctrlTop {
@@ -115,11 +122,11 @@
     }
 
     #controlBar select {
-      background: #222;
-      color: #ddd;
-      border: 1px solid #444;
+      background: rgba(10, 10, 10, 0.35);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.45);
       padding: 4px 8px;
-      border-radius: 8px;
+      border-radius: 6px;
     }
 
     .hint {
@@ -139,16 +146,16 @@
       <div id="controlBar">
         <div class="ctrlRow leftHalf">
           <div class="ctrlTop">
-            <span class="team red">Red</span>
             <div class="ctrlSelectCol">
-              <label>
+              <div class="teamBadge red">
+                <span aria-hidden="true">🎮</span>
                 <select id="redControllerSelect" aria-label="Red controller">
                   <option value="human">Gamepad/KB</option>
                   <option value="cursor">Cursor</option>
                   <option value="fuelSeeker">Auto Fuel Seeker</option>
                   <option value="adaptiveHub">Auto Adaptive Hub</option>
                 </select>
-              </label>
+              </div>
               <span id="redKbHint" class="hint"></span>
             </div>
           </div>
@@ -156,16 +163,16 @@
 
         <div class="ctrlRow rightHalf">
           <div class="ctrlTop">
-            <span class="team blue">Blue</span>
             <div class="ctrlSelectCol">
-              <label>
+              <div class="teamBadge blue">
+                <span aria-hidden="true">🎮</span>
                 <select id="blueControllerSelect" aria-label="Blue controller">
                   <option value="human">Gamepad/KB</option>
                   <option value="cursor">Cursor</option>
                   <option value="fuelSeeker">Auto Fuel Seeker</option>
                   <option value="adaptiveHub">Auto Adaptive Hub</option>
                 </select>
-              </label>
+              </div>
               <span id="blueKbHint" class="hint"></span>
             </div>
           </div>
@@ -894,6 +901,7 @@
         this.active = false;
         this.phase = "IDLE";
         this.phaseStartMs = 0;
+        this.resetStartMs = 0;
 
         this.robotSpeed = ROBOT_SPEED * 0.62;
         this.fuelSpeed = ROBOT_SPEED * 0.39;
@@ -910,6 +918,7 @@
         this.fuelReturnDone = false;
         this.robotsAtStart = {Blue: false, Red: false};
         this.robotsAtEjectWall = {Blue: false, Red: false};
+        this.lastNotifiedPhase = null;
         this.fuelMotion = new WeakMap();
         this.fuelProgress = new WeakMap();
         this.fuelReturnMeta = new WeakMap();
@@ -917,11 +926,14 @@
         this.lightRedReturnColor = 0xff8f8f;
         this.lightBlueReturnColor = 0x89d8ff;
         this.driftStartDist = this.fuelArriveDist * 2.0;
+        this.allianceReturnHeadStartMs = 2000;
 
         this.maxEjectWallMs = 5000;
         this.maxFuelReturnMs = 8000;
+        this.maxEmptyRobotsMs = 3500;
         this.maxRobotReturnMs = 5000;
         this.maxReloadMs = 4500;
+        this.maxTotalResetMs = 26000;
       }
 
       isActive() {
@@ -932,12 +944,14 @@
         this.active = true;
         this.phase = "EJECT_TO_WORLD";
         this.phaseStartMs = nowMs;
+        this.resetStartMs = nowMs;
         this.hubEjectDone = false;
         this.fuelReturnDone = false;
         this.robotsAtStart.Blue = false;
         this.robotsAtStart.Red = false;
         this.robotsAtEjectWall.Blue = false;
         this.robotsAtEjectWall.Red = false;
+        this.lastNotifiedPhase = "EJECT_TO_WORLD";
         this.fuelMotion = new WeakMap();
         this.fuelProgress = new WeakMap();
         this.fuelReturnMeta = new WeakMap();
@@ -1004,6 +1018,18 @@
 
       update(scene, nowMs, deltaMs) {
         if (!this.active) return;
+        if ((nowMs - this.resetStartMs) >= this.maxTotalResetMs) {
+          this.forceRestoreRobotStartingFuel(scene);
+          this.snapAllFuelToOrigins(scene);
+          this.finish(scene, nowMs);
+          return;
+        }
+        if (this.lastNotifiedPhase !== this.phase) {
+          if (typeof scene.onResetPhaseChanged === "function") {
+            scene.onResetPhaseChanged(this.phase, this.lastNotifiedPhase);
+          }
+          this.lastNotifiedPhase = this.phase;
+        }
         this.refreshResetFuelTints(scene);
 
         if (this.phase === "EJECT_TO_WORLD") {
@@ -1048,7 +1074,17 @@
         if (this.phase === "EMPTY_ROBOTS") {
           const blueEmpty = (scene.blueRobot.state.fuelStore.length === 0);
           const redEmpty = (scene.redRobot.state.fuelStore.length === 0);
+          const timedOut = (nowMs - this.phaseStartMs) >= this.maxEmptyRobotsMs;
+          if (timedOut && !(blueEmpty && redEmpty)) {
+            this.releaseRobotFuelToWorld(scene, "Blue");
+            this.releaseRobotFuelToWorld(scene, "Red");
+          }
           if (blueEmpty && redEmpty) {
+            this.phase = "RETURN_ROBOTS";
+            this.phaseStartMs = nowMs;
+            return;
+          }
+          if (timedOut) {
             this.phase = "RETURN_ROBOTS";
             this.phaseStartMs = nowMs;
           }
@@ -1105,10 +1141,14 @@
       }
 
       finish(scene, nowMs) {
+        const prevPhase = this.phase;
         this.normalizeRobotStartingFuel(scene);
         this.clearResetFuelTint(scene);
         this.active = false;
         this.phase = "IDLE";
+        if (typeof scene.onResetPhaseChanged === "function") {
+          scene.onResetPhaseChanged("IDLE", prevPhase);
+        }
         scene.matter.world.pause();
 
         scene.redHub.fuelStore = [];
@@ -1215,7 +1255,7 @@
             : origin.pos;
           this.applyResetFuelTint(f, origin);
 
-          const meta = this.getFuelReturnMeta(f, nowMs);
+          const meta = this.getFuelReturnMeta(scene, f, nowMs);
           if (nowMs < meta.startAtMs) {
             this.fuelMotion.set(f, {vx: 0, vy: 0});
             scene.matter.body.setVelocity(body, {x: 0, y: 0});
@@ -1429,11 +1469,11 @@
         this.fuelReturnMeta = new WeakMap();
         for (const f of scene.fuels) {
           if (!f || !f.body) continue;
-          this.getFuelReturnMeta(f, nowMs);
+          this.getFuelReturnMeta(scene, f, nowMs);
         }
       }
 
-      getFuelReturnMeta(fuel, nowMs) {
+      getFuelReturnMeta(scene, fuel, nowMs) {
         let meta = this.fuelReturnMeta.get(fuel);
         if (meta) return meta;
 
@@ -1443,9 +1483,16 @@
         const kindHash = (origin.kind === "robot") ? 19 : (origin.kind === "depot" ? 13 : 5);
         const hash = (slot * 73 + ownerHash * 11 + kindHash) % 997;
         const delayMs = hash % 301; // stagger starts over 0..300ms
+        const target = (origin.kind === "robot")
+          ? scene.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
+          : origin.pos;
+        const targetZone = target ? scene.getZoneForX(target.x).id : ZoneId.NEUTRAL;
+        const extraDelayMs = (targetZone === ZoneId.RED || targetZone === ZoneId.BLUE)
+          ? 0
+          : this.allianceReturnHeadStartMs;
 
         meta = {
-          startAtMs: nowMs + delayMs,
+          startAtMs: nowMs + delayMs + extraDelayMs,
           driftPhase: ((hash % 360) * Math.PI) / 180,
           driftOmega: 0.004 + ((hash % 7) * 0.00045),
           driftAmp: this.fuelSpeed * (0.08 + ((hash % 5) * 0.02))
@@ -1589,6 +1636,7 @@
           if (dist <= INTAKE_GRAB_RADIUS) {
             fuel.stash(robot.name);
             robot.state.fuelStore.push(fuel);
+            if (typeof scene.playResetPickupTick === "function") scene.playResetPickupTick();
             continue;
           }
 
@@ -2362,6 +2410,7 @@
           .setAlpha(0.12)  // optional: make it look printed, not a sticker
           .setScale(HUB_H / this.textures.get("rebuiltLogo").getSourceImage().height);
 
+
         // Sleep config
         const engine = this.matter.world.engine;
         engine.enableSleeping = true;
@@ -2385,6 +2434,14 @@
         this.lastPlayedTransitionWarningFor = null;
         this.hasPlayedMatchEndSound = false;
         this.hasPlayedMatchResultSound = false;
+        this.lastResetPickupMs = 0;
+        this.resetAudioCtx = null;
+        this.resetHumOsc = null;
+        this.resetHumGain = null;
+        this.resetAmbienceActive = false;
+        this.nextResetAmbienceMs = 0;
+        this.resetAmbienceBaseFreq = 165;
+        this.resetAmbienceStep = 0;
 
         // Timeframe state
         this.currentTimeframeIndex = -1;
@@ -2555,11 +2612,9 @@
         this.toggleBtnText.setInteractive({useHandCursor: true});
         this.toggleBtnText.on("pointerdown", () => this.toggleRun());
         this.resetBtnBg.on("pointerdown", () => {
-          if (!this.resetAnimator || !this.resetAnimator.isActive()) this.startResetAnimation();
-        });
-        this.resetBtnText.setInteractive({useHandCursor: true});
-        this.resetBtnText.on("pointerdown", () => {
-          if (!this.resetAnimator || !this.resetAnimator.isActive()) this.startResetAnimation();
+          if (!this.resetAnimator || !this.resetAnimator.isActive()) {
+            this.startResetAnimation();
+          }
         });
 
         // Start paused
@@ -2948,17 +3003,209 @@
         this.timeframeCounterText.setText(`${m}:${s.toString().padStart(2, "0")}`);
       }
 
-      playMatchSound(key) {
+      playMatchSound(key, config = null) {
         if (!this.sound) return;
+        if (this.sound.context && this.sound.context.state === "suspended") {
+          this.sound.context.resume().catch(() => {});
+        }
+        if (typeof this.sound.unlock === "function") {
+          try { this.sound.unlock(); } catch (e) {}
+        }
         if (this.sound.locked) {
           const onceUnlocked = () => {
             this.sound.off("unlocked", onceUnlocked);
-            this.sound.play(key);
+            this.sound.play(key, config || undefined);
           };
           this.sound.on("unlocked", onceUnlocked);
           return;
         }
-        this.sound.play(key);
+        this.sound.play(key, config || undefined);
+      }
+
+      getResetAudioContext() {
+        if (this.resetAudioCtx) return this.resetAudioCtx;
+        if (this.sound && this.sound.context) {
+          this.resetAudioCtx = this.sound.context;
+          return this.resetAudioCtx;
+        }
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        try {
+          this.resetAudioCtx = new Ctx();
+          return this.resetAudioCtx;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      ensureResetAudioReady() {
+        const ctx = this.getResetAudioContext();
+        if (!ctx) return null;
+        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        return ctx;
+      }
+
+      playResetTone({freq = 320, type = "sine", durationMs = 110, volume = 0.04, toFreq = null, delayMs = 0}) {
+        const ctx = this.ensureResetAudioReady();
+        if (!ctx) return;
+        try {
+          const startAt = ctx.currentTime + Math.max(0, delayMs) / 1000;
+          const endAt = startAt + Math.max(20, durationMs) / 1000;
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(Math.max(30, freq), startAt);
+          if (toFreq != null) {
+            osc.frequency.exponentialRampToValueAtTime(Math.max(30, toFreq), endAt);
+          }
+          gain.gain.setValueAtTime(0.0001, startAt);
+          gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, volume), startAt + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(startAt);
+          osc.stop(endAt + 0.03);
+          osc.onended = () => {
+            try { osc.disconnect(); } catch (e) {}
+            try { gain.disconnect(); } catch (e) {}
+          };
+        } catch (e) {
+          // Never let reset audio break reset state updates.
+        }
+      }
+
+      playResetStartCue() {
+        this.playResetTone({freq: 230, type: "triangle", durationMs: 110, volume: 0.022, toFreq: 275});
+        this.playResetTone({freq: 280, type: "triangle", durationMs: 130, volume: 0.022, toFreq: 330, delayMs: 85});
+      }
+
+      playResetFinishCue() {
+        this.playResetTone({freq: 240, type: "triangle", durationMs: 120, volume: 0.042, toFreq: 300});
+        this.playResetTone({freq: 300, type: "square", durationMs: 70, volume: 0.014, toFreq: 285, delayMs: 18});
+        this.playResetTone({freq: 330, type: "triangle", durationMs: 140, volume: 0.046, toFreq: 405, delayMs: 115});
+        this.playResetTone({freq: 410, type: "square", durationMs: 80, volume: 0.015, toFreq: 390, delayMs: 140});
+        this.playResetTone({freq: 455, type: "triangle", durationMs: 170, volume: 0.05, toFreq: 560, delayMs: 250});
+      }
+
+      startResetHum(freq = 150) {
+        const ctx = this.ensureResetAudioReady();
+        if (!ctx) return;
+        try {
+          if (this.resetHumOsc && this.resetHumGain) {
+            this.resetHumOsc.frequency.setTargetAtTime(Math.max(40, freq), ctx.currentTime, 0.12);
+            return;
+          }
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(Math.max(40, freq), ctx.currentTime);
+          gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.018, ctx.currentTime + 0.25);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          this.resetHumOsc = osc;
+          this.resetHumGain = gain;
+        } catch (e) {
+          this.resetHumOsc = null;
+          this.resetHumGain = null;
+        }
+      }
+
+      stopResetHum() {
+        const ctx = this.getResetAudioContext();
+        if (!this.resetHumOsc || !this.resetHumGain || !ctx) {
+          this.resetHumOsc = null;
+          this.resetHumGain = null;
+          return;
+        }
+        try {
+          const endAt = ctx.currentTime + 0.14;
+          this.resetHumGain.gain.cancelScheduledValues(ctx.currentTime);
+          this.resetHumGain.gain.setValueAtTime(Math.max(0.0001, this.resetHumGain.gain.value), ctx.currentTime);
+          this.resetHumGain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+          this.resetHumOsc.stop(endAt + 0.02);
+          this.resetHumOsc.onended = () => {
+            try { this.resetHumOsc.disconnect(); } catch (e) {}
+            try { this.resetHumGain.disconnect(); } catch (e) {}
+            this.resetHumOsc = null;
+            this.resetHumGain = null;
+          };
+        } catch (e) {
+          this.resetHumOsc = null;
+          this.resetHumGain = null;
+        }
+      }
+
+      playResetPickupTick() {
+        const now = Date.now();
+        if ((now - this.lastResetPickupMs) < 120) return;
+        this.lastResetPickupMs = now;
+        this.playResetTone({freq: 470, type: "triangle", durationMs: 36, volume: 0.007, toFreq: 390});
+      }
+
+      startResetAmbience(nowMs = Date.now(), baseFreq = 165) {
+        this.resetAmbienceActive = true;
+        this.resetAmbienceBaseFreq = baseFreq;
+        this.resetAmbienceStep = 0;
+        this.nextResetAmbienceMs = nowMs + 80;
+      }
+
+      stopResetAmbience() {
+        this.resetAmbienceActive = false;
+      }
+
+      setResetAmbienceBase(baseFreq) {
+        this.resetAmbienceBaseFreq = Phaser.Math.Clamp(baseFreq, 90, 320);
+      }
+
+      updateResetAmbience(nowMs) {
+        if (!this.resetAmbienceActive) return;
+        if (nowMs < this.nextResetAmbienceMs) return;
+        const step = this.resetAmbienceStep % 4;
+        const base = this.resetAmbienceBaseFreq;
+        const pulseFreq = (step === 2) ? (base * 1.08) : base;
+        const pulseVol = (step === 0 || step === 2) ? 0.0065 : 0.004;
+        const pulseDur = (step === 0) ? 95 : 75;
+        this.playResetTone({
+          freq: pulseFreq,
+          type: "sine",
+          durationMs: pulseDur,
+          volume: pulseVol,
+          toFreq: pulseFreq * 0.96
+        });
+        this.resetAmbienceStep += 1;
+        this.nextResetAmbienceMs = nowMs + ((step === 1) ? 520 : 720);
+      }
+
+      onResetPhaseChanged(nextPhase, prevPhase) {
+        if (nextPhase === "EJECT_TO_WORLD") {
+          this.setResetAmbienceBase(150);
+          this.playResetTone({freq: 210, type: "triangle", durationMs: 90, volume: 0.016, toFreq: 185});
+          return;
+        }
+        if (nextPhase === "RETURN_FUEL") {
+          this.setResetAmbienceBase(170);
+          this.playResetTone({freq: 180, type: "sine", durationMs: 86, volume: 0.015, toFreq: 220});
+          return;
+        }
+        if (nextPhase === "RETURN_ROBOTS" || nextPhase === "RELOAD_STARTING_FUEL") {
+          this.setResetAmbienceBase(190);
+          this.playResetTone({freq: 220, type: "triangle", durationMs: 80, volume: 0.014, toFreq: 265});
+          return;
+        }
+        if (nextPhase === "EMPTY_ROBOTS") {
+          this.setResetAmbienceBase(140);
+          this.playResetTone({freq: 160, type: "triangle", durationMs: 82, volume: 0.014, toFreq: 140});
+          return;
+        }
+        if (nextPhase === "IDLE") {
+          this.stopResetAmbience();
+          this.stopResetHum();
+          if (prevPhase && prevPhase !== "IDLE") {
+            this.playResetFinishCue();
+          }
+        }
       }
 
       toggleRun() {
@@ -3411,6 +3658,14 @@
       // -----------------------------
       startResetAnimation() {
         const now = Date.now();
+        if (this.sound) {
+          this.sound.mute = false;
+          this.sound.volume = 1.0;
+        }
+        this.stopResetHum();
+        this.stopResetAmbience();
+        this.playResetStartCue();
+        this.startResetAmbience(now, 150);
         this.resetAnimator.start(this, now);
       }
 
@@ -3431,6 +3686,7 @@
         const resetActive = !!(this.resetAnimator && this.resetAnimator.isActive());
 
         if (resetActive) {
+          this.updateResetAmbience(now);
           this.resetAnimator.update(this, now, delta);
           if (!this.resetAnimator.isActive()) {
             return;
