@@ -39,18 +39,12 @@
     /* --- override: vertically center the overlay UI --- */
     #controlBar {
       position: absolute;
-      left: 10px;
-      right: 10px;
+      left: 0;
+      right: 0;
       bottom: 10px;
 
       height: 100px;
-      /* adjust 40–52 if you want */
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      align-items: center;
-      /* centers halves vertically */
-      padding: 0 12px;
-      /* no vertical padding */
+      display: block;
       background: transparent;
       border: none;
       border-radius: 0;
@@ -64,13 +58,22 @@
 
     .leftHalf,
     .rightHalf {
+      position: absolute;
+      top: 50%;
       display: flex;
       align-items: center;
-      /* centers items vertically */
       justify-content: center;
-      /* centers within each half (zone) */
       gap: 6px;
-      height: 100%;
+      transform: translate(-50%, -50%);
+      pointer-events: auto;
+    }
+
+    .leftHalf {
+      left: 13.8889%;
+    }
+
+    .rightHalf {
+      left: 86.1111%;
     }
 
     /* Helps text/select baselines not sag */
@@ -98,14 +101,16 @@
 
     .ctrlTop {
       display: flex;
+      flex-direction: column;
       align-items: center;
+      justify-content: center;
       gap: 6px;
     }
 
     .ctrlSelectCol {
       display: flex;
       flex-direction: column;
-      align-items: stretch;
+      align-items: center;
       gap: 5px;
     }
 
@@ -123,7 +128,7 @@
       opacity: 0.75;
       white-space: nowrap;
       min-height: 12px;
-      text-align: right;
+      text-align: center;
     }
   </style>
 </head>
@@ -258,11 +263,12 @@
 
 
     // Fuel physics
-    const FUEL_RESTITUTION = 0.25;
-    const FUEL_FRICTION = 0.02;
-    const FUEL_FRICTION_AIR = 0.03;
+    const FUEL_RESTITUTION = 0.42;
+    const FUEL_FRICTION = 0.01;
+    const FUEL_FRICTION_AIR = 0.018;
     const FUEL_DENSITY = 0.001;
-    const FUEL_SLEEP_THRESHOLD = 60;
+    const FUEL_SLEEP_THRESHOLD = 120;
+    const WALL_RESTITUTION = 0.38;
 
     // Fuel colors
     const FUEL_COLOR_GROUND = 0xffb000;
@@ -617,7 +623,9 @@
         const scene = this.scene;
 
         // Controller -> commands (Patch 1)
-        const cmd = this.controller.getCommands(scene, this, delta);
+        const cmd = (scene.resetAnimator && scene.resetAnimator.isActive())
+          ? scene.resetAnimator.getCommands(scene, this, delta)
+          : this.controller.getCommands(scene, this, delta);
 
         // Apply drive
         scene.matter.body.setVelocity(this.body, {x: cmd.vx, y: cmd.vy});
@@ -655,27 +663,29 @@
         this.intakeG.lineBetween(w / 2, -h / 2, w / 2, h / 2);
         this.intakeG.lineBetween(-w / 2, h / 2, w / 2, h / 2);
 
-        // Turret aim:
-        // - If robot is in NEUTRAL zone: aim at nearer of (top-center, bottom-center) of the robot's OWN zone
-        // - Otherwise: aim at corresponding hub center
+        this.updateAimAndLabel(delta);
+      }
+
+      setController(controller) {
+        this.controller = controller || new HumanController();
+      }
+
+      updateAimAndLabel(delta) {
+        const scene = this.scene;
         const rx = this.body.position.x;
         const ry = this.body.position.y;
 
         let tx, ty;
-
         const myZoneId = scene.getZoneForX(rx).id;
         const allianceZoneId = (this.name === "Blue") ? ZoneId.BLUE : ZoneId.RED;
 
         if (myZoneId !== allianceZoneId) {
           const z = scene.zones.find(zz => zz.id === allianceZoneId);
-
           const zx = z.centerX();
           const top = {x: zx, y: FIELD_H * 0.25};
           const bot = {x: zx, y: FIELD_H * 0.75};
-
           const dTop = (top.x - rx) * (top.x - rx) + (top.y - ry) * (top.y - ry);
           const dBot = (bot.x - rx) * (bot.x - rx) + (bot.y - ry) * (bot.y - ry);
-
           const pick = (dTop <= dBot) ? top : bot;
           tx = pick.x;
           ty = pick.y;
@@ -686,10 +696,8 @@
         }
 
         const target = Math.atan2(ty - ry, tx - rx) + TURRET_YAW_OFFSET;
-
         const dt = Math.max(0.001, (delta || 16.7) / 1000.0);
         const maxStep = TURRET_MAX_OMEGA * dt;
-
         let err = Phaser.Math.Angle.Wrap(target - this.turretAngle);
         err = Phaser.Math.Clamp(err, -maxStep, maxStep);
         this.turretAngle = Phaser.Math.Angle.Wrap(this.turretAngle + err);
@@ -698,15 +706,10 @@
         this.turretG.y = ry;
         this.turretG.rotation = this.turretAngle;
 
-        // Fuel count label (upright) — array length
         this.label.setText(`${this.state.fuelStore.length}`);
         this.label.x = rx;
         this.label.y = ry;
         this.label.rotation = 0;
-      }
-
-      setController(controller) {
-        this.controller = controller || new HumanController();
       }
     }
 
@@ -725,6 +728,7 @@
 
         this.owner = null;     // "Red" | "Blue" | null
         this.isStored = false; // inside robot
+        this.resetOrigin = null;
       }
 
       spawnGround(x, y) {
@@ -881,6 +885,732 @@
        */
       getCommands(scene, robot, delta) {
         return {vx: 0, vy: 0, omega: 0, shoot: false};
+      }
+    }
+
+    class ResetAnimationController extends BaseController {
+      constructor() {
+        super();
+        this.active = false;
+        this.phase = "IDLE";
+        this.phaseStartMs = 0;
+
+        this.robotSpeed = ROBOT_SPEED * 0.62;
+        this.fuelSpeed = ROBOT_SPEED * 0.39;
+        this.robotArriveDist = 18;
+        this.fuelArriveDist = 10;
+
+        this.hubAvoidHard = Math.hypot(HUB_W / 2, HUB_H / 2) + FUEL_R + 8;
+        this.hubAvoidSoft = this.hubAvoidHard + 30;
+        this.robotAvoidHard = Math.hypot(ROBOT_W / 2, ROBOT_H / 2) + FUEL_R + 7;
+        this.robotAvoidSoft = this.robotAvoidHard + 22;
+        this.fuelNeighborDist = FUEL_R * 3.4;
+
+        this.hubEjectDone = false;
+        this.fuelReturnDone = false;
+        this.robotsAtStart = {Blue: false, Red: false};
+        this.robotsAtEjectWall = {Blue: false, Red: false};
+        this.fuelMotion = new WeakMap();
+        this.fuelProgress = new WeakMap();
+        this.fuelReturnMeta = new WeakMap();
+        this.fieldReturnColor = 0xffb000;
+        this.lightRedReturnColor = 0xff8f8f;
+        this.lightBlueReturnColor = 0x89d8ff;
+        this.driftStartDist = this.fuelArriveDist * 2.0;
+
+        this.maxEjectWallMs = 5000;
+        this.maxFuelReturnMs = 8000;
+        this.maxRobotReturnMs = 5000;
+        this.maxReloadMs = 4500;
+      }
+
+      isActive() {
+        return this.active;
+      }
+
+      start(scene, nowMs) {
+        this.active = true;
+        this.phase = "EJECT_TO_WORLD";
+        this.phaseStartMs = nowMs;
+        this.hubEjectDone = false;
+        this.fuelReturnDone = false;
+        this.robotsAtStart.Blue = false;
+        this.robotsAtStart.Red = false;
+        this.robotsAtEjectWall.Blue = false;
+        this.robotsAtEjectWall.Red = false;
+        this.fuelMotion = new WeakMap();
+        this.fuelProgress = new WeakMap();
+        this.fuelReturnMeta = new WeakMap();
+
+        if (scene.victoryReveal) scene.victoryReveal.reset();
+        scene.matchOver = false;
+        scene.isRunning = false;
+        scene.hasMatchStarted = false;
+        scene.pauseStartMs = nowMs;
+        scene.matter.world.resume();
+        if (scene.resetBtnText) scene.resetBtnText.setText("Resetting ...");
+      }
+
+      canIntakeFuel(robotObj, fuelObj) {
+        if (!this.active) return true;
+        if (this.phase !== "RELOAD_STARTING_FUEL") return false;
+        return !!(fuelObj && fuelObj.resetOrigin && fuelObj.resetOrigin.kind === "robot" && fuelObj.resetOrigin.owner === robotObj.name);
+      }
+
+      getCommands(scene, robot, delta) {
+        if (!this.active) return {vx: 0, vy: 0, omega: 0, shoot: false};
+
+        if (this.phase === "EJECT_TO_WORLD") {
+          const target = scene.getRobotEjectWallPose(robot.name);
+          const fuelTarget = scene.getRobotOnboardFuelTargetPoint(robot.name);
+          const move = this.driveRobotToPose(scene, robot, target, 0.99, "point_when_arrived", fuelTarget);
+          this.robotsAtEjectWall[robot.name] = move.arrived;
+          return {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+        }
+
+        if (this.phase === "EMPTY_ROBOTS") {
+          return {vx: 0, vy: 0, omega: 0, shoot: (robot.state.fuelStore.length > 0)};
+        }
+
+        if (this.phase === "RETURN_ROBOTS") {
+          const p = scene.getRobotOnboardFuelTargetPoint(robot.name);
+          const move = this.driveRobotToPose(scene, robot, {x: p.x, y: p.y}, 1.0, "never");
+          this.robotsAtStart[robot.name] = move.arrived;
+          return {vx: move.vx, vy: move.vy, omega: move.omega, shoot: false};
+        }
+
+        if (this.phase === "RELOAD_STARTING_FUEL") {
+          const p = scene.getRobotOnboardFuelTargetPoint(robot.name);
+          const loaded = robot.state.fuelStore.length >= PRELOADED_FUEL;
+          const depot = scene.getAllianceDepotPoint(robot.name);
+          const move = this.driveRobotToPose(
+            scene,
+            robot,
+            {x: p.x, y: p.y},
+            1.0,
+            loaded ? "point_when_arrived" : "never",
+            loaded ? depot : null
+          );
+          return {
+            vx: move.arrived ? 0 : move.vx,
+            vy: move.arrived ? 0 : move.vy,
+            omega: move.omega,
+            shoot: false
+          };
+        }
+
+        return {vx: 0, vy: 0, omega: 0, shoot: false};
+      }
+
+      update(scene, nowMs, deltaMs) {
+        if (!this.active) return;
+        this.refreshResetFuelTints(scene);
+
+        if (this.phase === "EJECT_TO_WORLD") {
+          if (!this.hubEjectDone) {
+            this.ejectHubFuel(scene);
+            this.releaseRobotFuelToWorld(scene, "Blue");
+            this.releaseRobotFuelToWorld(scene, "Red");
+            this.hubEjectDone = true;
+            this.phaseStartMs = nowMs;
+          }
+          const ejectDelayDone = (nowMs - this.phaseStartMs) >= 350;
+          const ejectTimedOut = (nowMs - this.phaseStartMs) >= this.maxEjectWallMs;
+          if (ejectTimedOut && !(this.robotsAtEjectWall.Blue && this.robotsAtEjectWall.Red)) {
+            scene.blueRobot.setPose(scene.getRobotEjectWallPose("Blue"));
+            scene.redRobot.setPose(scene.getRobotEjectWallPose("Red"));
+            this.robotsAtEjectWall.Blue = true;
+            this.robotsAtEjectWall.Red = true;
+          }
+          const robotsParked = this.robotsAtEjectWall.Blue && this.robotsAtEjectWall.Red;
+          if (ejectDelayDone && robotsParked) {
+            this.phase = "RETURN_FUEL";
+            this.phaseStartMs = nowMs;
+            this.initializeFuelReturnMeta(scene, nowMs);
+          }
+          return;
+        }
+
+        if (this.phase === "RETURN_FUEL") {
+          this.fuelReturnDone = this.moveFuelTowardOrigins(scene, deltaMs, nowMs);
+          const timedOut = (nowMs - this.phaseStartMs) >= this.maxFuelReturnMs;
+          if (timedOut && !this.fuelReturnDone) {
+            this.snapAllFuelToOrigins(scene);
+            this.fuelReturnDone = true;
+          }
+          if (this.fuelReturnDone) {
+            this.phase = "EMPTY_ROBOTS";
+            this.phaseStartMs = nowMs;
+          }
+          return;
+        }
+
+        if (this.phase === "EMPTY_ROBOTS") {
+          const blueEmpty = (scene.blueRobot.state.fuelStore.length === 0);
+          const redEmpty = (scene.redRobot.state.fuelStore.length === 0);
+          if (blueEmpty && redEmpty) {
+            this.phase = "RETURN_ROBOTS";
+            this.phaseStartMs = nowMs;
+          }
+          return;
+        }
+
+        if (this.phase === "RETURN_ROBOTS") {
+          const timedOut = (nowMs - this.phaseStartMs) >= this.maxRobotReturnMs;
+          if (timedOut && !(this.robotsAtStart.Blue && this.robotsAtStart.Red)) {
+            const bp = scene.getRobotOnboardFuelTargetPoint("Blue");
+            const rp = scene.getRobotOnboardFuelTargetPoint("Red");
+            scene.blueRobot.setPose({x: bp.x, y: bp.y, angle: scene.blueRobot.body.angle});
+            scene.redRobot.setPose({x: rp.x, y: rp.y, angle: scene.redRobot.body.angle});
+            this.robotsAtStart.Blue = true;
+            this.robotsAtStart.Red = true;
+          }
+          if (this.robotsAtStart.Blue && this.robotsAtStart.Red) {
+            this.phase = "RELOAD_STARTING_FUEL";
+            this.phaseStartMs = nowMs;
+          }
+          return;
+        }
+
+        if (this.phase === "RELOAD_STARTING_FUEL") {
+          this.collectStartingFuel(scene, scene.blueRobot);
+          this.collectStartingFuel(scene, scene.redRobot);
+          const blueLoaded = scene.blueRobot.state.fuelStore.length >= PRELOADED_FUEL;
+          const redLoaded = scene.redRobot.state.fuelStore.length >= PRELOADED_FUEL;
+          const blueFacing = this.isRobotFacingDepot(scene, scene.blueRobot);
+          const redFacing = this.isRobotFacingDepot(scene, scene.redRobot);
+          const timedOut = (nowMs - this.phaseStartMs) >= this.maxReloadMs;
+          if (timedOut && !(blueLoaded && redLoaded)) {
+            this.forceRestoreRobotStartingFuel(scene);
+          }
+          if (timedOut && blueLoaded && redLoaded && !(blueFacing && redFacing)) {
+            scene.blueRobot.setPose(scene.getRobotStartPoseForAlliance("Blue"));
+            scene.redRobot.setPose(scene.getRobotStartPoseForAlliance("Red"));
+          }
+          const blueLoadedNow = scene.blueRobot.state.fuelStore.length >= PRELOADED_FUEL;
+          const redLoadedNow = scene.redRobot.state.fuelStore.length >= PRELOADED_FUEL;
+          const blueFacingNow = this.isRobotFacingDepot(scene, scene.blueRobot);
+          const redFacingNow = this.isRobotFacingDepot(scene, scene.redRobot);
+          if (blueLoadedNow && redLoadedNow && blueFacingNow && redFacingNow) {
+            this.finish(scene, nowMs);
+          }
+        }
+      }
+
+      refreshResetFuelTints(scene) {
+        for (const fuel of scene.fuels) {
+          if (!fuel || !fuel.body || !fuel.resetOrigin) continue;
+          this.applyResetFuelTint(fuel, fuel.resetOrigin);
+        }
+      }
+
+      finish(scene, nowMs) {
+        this.normalizeRobotStartingFuel(scene);
+        this.clearResetFuelTint(scene);
+        this.active = false;
+        this.phase = "IDLE";
+        scene.matter.world.pause();
+
+        scene.redHub.fuelStore = [];
+        scene.blueHub.fuelStore = [];
+        scene.matchStartMs = nowMs;
+        scene.matchOver = false;
+        scene.isRunning = false;
+        scene.hasMatchStarted = false;
+        scene.pausedTotalMs = 0;
+        scene.pauseStartMs = nowMs;
+
+        scene.lastPlayedTimeframeName = null;
+        scene.lastPlayedTransitionWarningFor = null;
+        scene.hasPlayedMatchEndSound = false;
+        scene.hasPlayedMatchResultSound = false;
+        scene.currentTimeframeIndex = -1;
+        scene.autoLeader = "TIE";
+        scene.redHub.setActive(true);
+        scene.blueHub.setActive(true);
+
+        scene.blueRobot.state.score = 0;
+        scene.redRobot.state.score = 0;
+
+        scene.blueRobot.setPose(scene.getRobotStartPoseForAlliance("Blue"));
+        scene.redRobot.setPose(scene.getRobotStartPoseForAlliance("Red"));
+        if (scene.resetBtnText) scene.resetBtnText.setText("Reset");
+        if (scene.toggleBtnText) scene.toggleBtnText.setText("Start");
+        scene.setTimeUI(MATCH_TIME_S);
+        scene.applyTimeframeForElapsedS(0);
+        scene.setTimeframeCountdownUI(scene.getTimeframeRemainingS(0));
+      }
+
+      normalizeRobotStartingFuel(scene) {
+        const owners = ["Blue", "Red"];
+        for (const owner of owners) {
+          const robot = (owner === "Blue") ? scene.blueRobot : scene.redRobot;
+          const starting = scene.fuels
+            .filter((f) => f.resetOrigin && f.resetOrigin.kind === "robot" && f.resetOrigin.owner === owner)
+            .sort((a, b) => (a.resetOrigin.slotIndex || 0) - (b.resetOrigin.slotIndex || 0));
+
+          robot.state.fuelStore = [];
+          for (let i = 0; i < Math.min(PRELOADED_FUEL, starting.length); i++) {
+            const fuel = starting[i];
+            fuel.stash(owner);
+            robot.state.fuelStore.push(fuel);
+          }
+        }
+      }
+
+      ejectHubFuel(scene) {
+        const hubs = [scene.redHub, scene.blueHub];
+        for (const hub of hubs) {
+          while (hub.fuelStore.length > 0) {
+            const item = hub.fuelStore.shift();
+            if (!item || !item.fuel) continue;
+            const spawnX = hub.center.x + Phaser.Math.FloatBetween(-24, 24);
+            const spawnY = hub.center.y + Phaser.Math.FloatBetween(-24, 24);
+            item.fuel.spawnGround(spawnX, spawnY);
+            scene.matter.body.setVelocity(item.fuel.body, {x: 0, y: 0});
+            item.fuel.body._noIntakeUntilMs = Date.now() + 350;
+          }
+        }
+      }
+
+      releaseRobotFuelToWorld(scene, robotName) {
+        const robot = (robotName === "Blue") ? scene.blueRobot : scene.redRobot;
+        if (!robot?.state?.fuelStore?.length) return;
+
+        const stored = robot.state.fuelStore.splice(0, robot.state.fuelStore.length);
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        for (let i = 0; i < stored.length; i++) {
+          const f = stored[i];
+          const ang = (Math.PI * 2 * i) / Math.max(1, stored.length);
+          const x = rx + Math.cos(ang) * (ROBOT_W * 0.25);
+          const y = ry + Math.sin(ang) * (ROBOT_H * 0.25);
+          f.spawnGround(x, y);
+          this.applyResetFuelTint(f, f.resetOrigin);
+          scene.matter.body.setVelocity(f.body, {x: 0, y: 0});
+          f.body._noIntakeUntilMs = Date.now() + 420;
+        }
+      }
+
+      moveFuelTowardOrigins(scene, deltaMs, nowMs) {
+        const movingFuel = scene.fuels.filter((f) => !!f.body);
+        if (!movingFuel.length) return true;
+
+        const frameScale = Phaser.Math.Clamp((deltaMs || 16.7) / 16.7, 0.55, 2.0);
+        const accelPerFrame = this.fuelSpeed * 0.16;
+        const nearDist = this.fuelArriveDist * 3.0;
+        let settledCount = 0;
+        for (let i = 0; i < movingFuel.length; i++) {
+          const f = movingFuel[i];
+          const body = f.body;
+          const origin = f.resetOrigin;
+          if (!origin) {
+            settledCount++;
+            scene.matter.body.setVelocity(body, {x: 0, y: 0});
+            continue;
+          }
+
+          const target = origin.kind === "robot"
+            ? scene.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
+            : origin.pos;
+          this.applyResetFuelTint(f, origin);
+
+          const meta = this.getFuelReturnMeta(f, nowMs);
+          if (nowMs < meta.startAtMs) {
+            this.fuelMotion.set(f, {vx: 0, vy: 0});
+            scene.matter.body.setVelocity(body, {x: 0, y: 0});
+            scene.matter.body.setAngularVelocity(body, 0);
+            continue;
+          }
+
+          const steer = this.getFuelSteering(scene, movingFuel, i, target.x, target.y);
+          const prev = this.fuelMotion.get(f) || {vx: 0, vy: 0};
+          const prog = this.fuelProgress.get(f) || {bestDist: Infinity, stallMs: 0, jitterMs: 0, jx: 0, jy: 0};
+
+          if (!steer.arrived && steer.dist > this.driftStartDist) {
+            const tMs = Math.max(0, nowMs - meta.startAtMs);
+            const driftWave = Math.sin((tMs * meta.driftOmega) + meta.driftPhase);
+            const dx = target.x - body.position.x;
+            const dy = target.y - body.position.y;
+            const dMag = Math.hypot(dx, dy);
+            const nx = dx / Math.max(1e-6, dMag);
+            const ny = dy / Math.max(1e-6, dMag);
+            const fade = Phaser.Math.Clamp((steer.dist - this.driftStartDist) / 140, 0, 1);
+            const drift = meta.driftAmp * driftWave * fade;
+            steer.vx += (-ny) * drift;
+            steer.vy += nx * drift;
+          }
+
+          if (steer.dist + 0.12 < prog.bestDist) {
+            prog.bestDist = steer.dist;
+            prog.stallMs = 0;
+          } else {
+            prog.stallMs += (deltaMs || 16.7);
+          }
+
+          if (prog.jitterMs <= 0 && prog.stallMs > 900 && steer.dist > (this.fuelArriveDist * 1.8)) {
+            const seed = (i * 971 + Math.floor((nowMs || 0) / 100)) % 997;
+            const ang = (seed / 997) * Math.PI * 2;
+            prog.jx = Math.cos(ang) * (this.fuelSpeed * 0.42);
+            prog.jy = Math.sin(ang) * (this.fuelSpeed * 0.42);
+            prog.jitterMs = 320;
+            prog.stallMs = 450;
+          }
+
+          if (prog.stallMs > 2400 && steer.dist > (this.fuelArriveDist * 2.2)) {
+            const nudgeX = Phaser.Math.FloatBetween(-2.2, 2.2);
+            const nudgeY = Phaser.Math.FloatBetween(-2.2, 2.2);
+            scene.matter.body.setPosition(body, {
+              x: Phaser.Math.Clamp(body.position.x + nudgeX, FUEL_R + 2, FIELD_W - FUEL_R - 2),
+              y: Phaser.Math.Clamp(body.position.y + nudgeY, FUEL_R + 2, FIELD_H - FUEL_R - 2)
+            });
+            prog.stallMs = 1000;
+          }
+
+          if (prog.jitterMs > 0) {
+            steer.vx += prog.jx;
+            steer.vy += prog.jy;
+            prog.jitterMs -= (deltaMs || 16.7);
+          }
+          let dvx = steer.vx - prev.vx;
+          let dvy = steer.vy - prev.vy;
+          const dvMag = Math.hypot(dvx, dvy);
+          if (dvMag > accelPerFrame) {
+            const s = accelPerFrame / dvMag;
+            dvx *= s;
+            dvy *= s;
+          }
+
+          let vx = prev.vx + dvx;
+          let vy = prev.vy + dvy;
+
+          if (!steer.arrived && steer.dist > nearDist) {
+            const sp = Math.hypot(vx, vy);
+            const minCruise = this.fuelSpeed * 0.42;
+            if (sp < minCruise && sp > 1e-6) {
+              const s = minCruise / sp;
+              vx *= s;
+              vy *= s;
+            }
+          }
+
+          const maxSp = this.fuelSpeed;
+          const sp = Math.hypot(vx, vy);
+          if (sp > maxSp) {
+            const s = maxSp / sp;
+            vx *= s;
+            vy *= s;
+          }
+
+          this.fuelMotion.set(f, {vx, vy});
+
+          if (steer.arrived) {
+            settledCount++;
+            scene.matter.body.setPosition(body, {x: target.x, y: target.y});
+            scene.matter.body.setVelocity(body, {x: 0, y: 0});
+            this.fuelMotion.set(f, {vx: 0, vy: 0});
+            this.fuelProgress.set(f, {bestDist: 0, stallMs: 0, jitterMs: 0, jx: 0, jy: 0});
+            continue;
+          }
+
+          const nx = body.position.x + (vx * frameScale);
+          const ny = body.position.y + (vy * frameScale);
+          scene.matter.body.setPosition(body, {
+            x: Phaser.Math.Clamp(nx, FUEL_R + 2, FIELD_W - FUEL_R - 2),
+            y: Phaser.Math.Clamp(ny, FUEL_R + 2, FIELD_H - FUEL_R - 2)
+          });
+          scene.matter.body.setVelocity(body, {x: 0, y: 0});
+          scene.matter.body.setAngularVelocity(body, 0);
+          this.fuelProgress.set(f, prog);
+        }
+
+        return settledCount >= movingFuel.length;
+      }
+
+      snapAllFuelToOrigins(scene) {
+        for (const f of scene.fuels) {
+          if (!f.body) continue;
+          const origin = f.resetOrigin;
+          if (!origin) {
+            scene.matter.body.setVelocity(f.body, {x: 0, y: 0});
+            continue;
+          }
+
+          const target = origin.kind === "robot"
+            ? scene.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
+            : origin.pos;
+          this.applyResetFuelTint(f, origin);
+          scene.matter.body.setPosition(f.body, {x: target.x, y: target.y});
+          scene.matter.body.setVelocity(f.body, {x: 0, y: 0});
+          scene.matter.body.setAngularVelocity(f.body, 0);
+        }
+      }
+
+      getFuelSteering(scene, movingFuel, selfIndex, tx, ty) {
+        const f = movingFuel[selfIndex];
+        const body = f.body;
+        const x = body.position.x;
+        const y = body.position.y;
+        const dx = tx - x;
+        const dy = ty - y;
+        const dist = Math.hypot(dx, dy);
+        if (dist <= this.fuelArriveDist) {
+          return {vx: 0, vy: 0, arrived: true, dist};
+        }
+
+        const nx = dx / Math.max(1e-6, dist);
+        const ny = dy / Math.max(1e-6, dist);
+        const speedByDist = Phaser.Math.Clamp(dist / 34, 0.22, 1.0);
+        let vx = nx * this.fuelSpeed * speedByDist;
+        let vy = ny * this.fuelSpeed * speedByDist;
+        const side = (selfIndex % 2 === 0) ? 1 : -1;
+
+        const hubs = [scene.redHub.center, scene.blueHub.center];
+        for (const hub of hubs) {
+          const ax = x - hub.x;
+          const ay = y - hub.y;
+          const d = Math.hypot(ax, ay);
+          if (d >= this.hubAvoidSoft) continue;
+          const ux = ax / Math.max(1e-6, d);
+          const uy = ay / Math.max(1e-6, d);
+          const t = Phaser.Math.Clamp((this.hubAvoidSoft - d) / Math.max(1e-6, this.hubAvoidSoft - this.hubAvoidHard), 0, 1);
+          vx += ux * this.fuelSpeed * 0.95 * t;
+          vy += uy * this.fuelSpeed * 0.95 * t;
+          if (d < this.hubAvoidHard + 9) {
+            const tangentGain = this.fuelSpeed * 0.55 * Phaser.Math.Clamp((this.hubAvoidHard + 9 - d) / 9, 0, 1);
+            vx += (-uy) * tangentGain * side;
+            vy += (ux) * tangentGain * side;
+          }
+        }
+
+        const robots = [scene.blueRobot, scene.redRobot];
+        for (const robot of robots) {
+          const ax = x - robot.body.position.x;
+          const ay = y - robot.body.position.y;
+          const d = Math.hypot(ax, ay);
+          if (d >= this.robotAvoidSoft) continue;
+          const ux = ax / Math.max(1e-6, d);
+          const uy = ay / Math.max(1e-6, d);
+          const t = Phaser.Math.Clamp((this.robotAvoidSoft - d) / Math.max(1e-6, this.robotAvoidSoft - this.robotAvoidHard), 0, 1);
+          vx += ux * this.fuelSpeed * 0.9 * t;
+          vy += uy * this.fuelSpeed * 0.9 * t;
+          if (d < this.robotAvoidHard + 7) {
+            const tangentGain = this.fuelSpeed * 0.4 * Phaser.Math.Clamp((this.robotAvoidHard + 7 - d) / 7, 0, 1);
+            vx += (-uy) * tangentGain * side;
+            vy += (ux) * tangentGain * side;
+          }
+        }
+
+        for (let j = 0; j < movingFuel.length; j++) {
+          if (j === selfIndex) continue;
+          const other = movingFuel[j].body;
+          const ax = x - other.position.x;
+          const ay = y - other.position.y;
+          const d = Math.hypot(ax, ay);
+          if (d <= 1e-6 || d >= this.fuelNeighborDist) continue;
+          const ux = ax / d;
+          const uy = ay / d;
+          const t = Phaser.Math.Clamp((this.fuelNeighborDist - d) / this.fuelNeighborDist, 0, 1);
+          vx += ux * this.fuelSpeed * 0.45 * t;
+          vy += uy * this.fuelSpeed * 0.45 * t;
+        }
+
+        const mag = Math.hypot(vx, vy);
+        if (mag > this.fuelSpeed) {
+          const s = this.fuelSpeed / mag;
+          vx *= s;
+          vy *= s;
+        }
+
+        return {vx, vy, arrived: false, dist};
+      }
+
+      initializeFuelReturnMeta(scene, nowMs) {
+        this.fuelReturnMeta = new WeakMap();
+        for (const f of scene.fuels) {
+          if (!f || !f.body) continue;
+          this.getFuelReturnMeta(f, nowMs);
+        }
+      }
+
+      getFuelReturnMeta(fuel, nowMs) {
+        let meta = this.fuelReturnMeta.get(fuel);
+        if (meta) return meta;
+
+        const origin = fuel.resetOrigin || {};
+        const ownerHash = (origin.owner === "Red") ? 17 : (origin.owner === "Blue" ? 31 : 7);
+        const slot = Number.isFinite(origin.slotIndex) ? origin.slotIndex : 0;
+        const kindHash = (origin.kind === "robot") ? 19 : (origin.kind === "depot" ? 13 : 5);
+        const hash = (slot * 73 + ownerHash * 11 + kindHash) % 997;
+        const delayMs = hash % 301; // stagger starts over 0..300ms
+
+        meta = {
+          startAtMs: nowMs + delayMs,
+          driftPhase: ((hash % 360) * Math.PI) / 180,
+          driftOmega: 0.004 + ((hash % 7) * 0.00045),
+          driftAmp: this.fuelSpeed * (0.08 + ((hash % 5) * 0.02))
+        };
+        this.fuelReturnMeta.set(fuel, meta);
+        return meta;
+      }
+
+      applyResetFuelTint(fuel, origin) {
+        if (!fuel || !fuel.gfx) return;
+        const kind = origin?.kind || "field";
+        const owner = origin?.owner || "Neutral";
+        fuel._resetTintTag = `reset:${kind}:${owner}`;
+
+        let color = this.fieldReturnColor;
+        if ((kind === "robot" || kind === "depot") && owner === "Red") color = this.lightRedReturnColor;
+        if ((kind === "robot" || kind === "depot") && owner === "Blue") color = this.lightBlueReturnColor;
+        fuel.gfx.clear();
+        fuel.gfx.fillStyle(color, 1);
+        fuel.gfx.fillCircle(0, 0, FUEL_R);
+      }
+
+      clearResetFuelTint(scene) {
+        for (const fuel of scene.fuels) {
+          if (!fuel || !fuel.gfx) continue;
+          if (!fuel._resetTintTag) continue;
+          fuel._resetTintTag = null;
+
+          const color = (fuel.body && fuel.body.isAirborne) ? FUEL_COLOR_SHOT : FUEL_COLOR_GROUND;
+          fuel.gfx.clear();
+          fuel.gfx.fillStyle(color, 1);
+          fuel.gfx.fillCircle(0, 0, FUEL_R);
+        }
+      }
+
+      driveRobotToPose(scene, robot, targetPose, speedScale = 1.0, angleMode = "always", anglePoint = null) {
+        const speed = this.robotSpeed * Phaser.Math.Clamp(speedScale, 0.2, 1.2);
+        const tx = targetPose.x;
+        const ty = targetPose.y;
+        const rx = robot.body.position.x;
+        const ry = robot.body.position.y;
+        const dx = tx - rx;
+        const dy = ty - ry;
+        const dist = Math.hypot(dx, dy);
+        if (dist <= this.robotArriveDist) {
+          if (angleMode === "never") {
+            return {vx: 0, vy: 0, omega: 0, arrived: true};
+          }
+          const desiredBodyAng = (angleMode === "point_when_arrived" && anglePoint)
+            ? (Math.atan2(anglePoint.y - ry, anglePoint.x - rx) - FORWARD_OFFSET)
+            : (Number.isFinite(targetPose.angle)
+              ? targetPose.angle
+              : (scene.getRobotStartPoseForAlliance(robot.name).angle));
+          const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+          const omega = Phaser.Math.Clamp(err * 6.0, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+          return {vx: 0, vy: 0, omega, arrived: Math.abs(err) < 0.09};
+        }
+
+        const nx = dx / Math.max(1e-6, dist);
+        const ny = dy / Math.max(1e-6, dist);
+        let vx = nx * speed;
+        let vy = ny * speed;
+
+        const hubs = [scene.redHub.center, scene.blueHub.center];
+        for (const hub of hubs) {
+          const ax = rx - hub.x;
+          const ay = ry - hub.y;
+          const d = Math.hypot(ax, ay);
+          if (d >= this.hubAvoidSoft + 12) continue;
+          const ux = ax / Math.max(1e-6, d);
+          const uy = ay / Math.max(1e-6, d);
+          const t = Phaser.Math.Clamp((this.hubAvoidSoft + 12 - d) / Math.max(1e-6, (this.hubAvoidSoft + 12) - this.hubAvoidHard), 0, 1);
+          vx += ux * speed * 1.2 * t;
+          vy += uy * speed * 1.2 * t;
+        }
+
+        const other = (robot.name === "Blue") ? scene.redRobot : scene.blueRobot;
+        const ox = rx - other.body.position.x;
+        const oy = ry - other.body.position.y;
+        const od = Math.hypot(ox, oy);
+        const robotSepDist = ROBOT_W * 1.15;
+        if (od > 1e-6 && od < robotSepDist) {
+          const ux = ox / od;
+          const uy = oy / od;
+          const t = Phaser.Math.Clamp((robotSepDist - od) / robotSepDist, 0, 1);
+          vx += ux * speed * t;
+          vy += uy * speed * t;
+        }
+
+        const mag = Math.hypot(vx, vy);
+        if (mag > speed) {
+          const s = speed / mag;
+          vx *= s;
+          vy *= s;
+        }
+
+        const heading = (mag > 1e-6) ? Math.atan2(vy, vx) : Math.atan2(dy, dx);
+        const desiredBodyAng = (angleMode === "always" && Number.isFinite(targetPose.angle))
+          ? targetPose.angle
+          : (heading - FORWARD_OFFSET);
+        const err = Phaser.Math.Angle.Wrap(desiredBodyAng - robot.body.angle);
+        const omega = Phaser.Math.Clamp(err * 6.0, -ROBOT_SPIN_SPEED, ROBOT_SPIN_SPEED);
+        return {vx, vy, omega, arrived: false};
+      }
+
+      isRobotFacingDepot(scene, robot) {
+        const depot = scene.getAllianceDepotPoint(robot.name);
+        const desired = Math.atan2(depot.y - robot.body.position.y, depot.x - robot.body.position.x) - FORWARD_OFFSET;
+        const err = Phaser.Math.Angle.Wrap(desired - robot.body.angle);
+        return Math.abs(err) < 0.09;
+      }
+
+      collectStartingFuel(scene, robot) {
+        if (!robot || robot.state.fuelStore.length >= PRELOADED_FUEL) return;
+
+        const intakeX = robot.intakeBody?.position?.x ?? robot.body.position.x;
+        const intakeY = robot.intakeBody?.position?.y ?? robot.body.position.y;
+        const candidates = [];
+
+        for (const fuel of scene.fuels) {
+          if (!fuel.body) continue;
+          if (!fuel.resetOrigin || fuel.resetOrigin.kind !== "robot") continue;
+          if (fuel.resetOrigin.owner !== robot.name) continue;
+          candidates.push(fuel);
+        }
+
+        candidates.sort((a, b) => {
+          const da = Phaser.Math.Distance.Between(a.body.position.x, a.body.position.y, intakeX, intakeY);
+          const db = Phaser.Math.Distance.Between(b.body.position.x, b.body.position.y, intakeX, intakeY);
+          return da - db;
+        });
+
+        for (const fuel of candidates) {
+          if (robot.state.fuelStore.length >= PRELOADED_FUEL) break;
+          const bx = fuel.body.position.x;
+          const by = fuel.body.position.y;
+          const dx = intakeX - bx;
+          const dy = intakeY - by;
+          const dist = Math.hypot(dx, dy);
+
+          if (dist <= INTAKE_GRAB_RADIUS) {
+            fuel.stash(robot.name);
+            robot.state.fuelStore.push(fuel);
+            continue;
+          }
+
+          const nx = dx / Math.max(1e-6, dist);
+          const ny = dy / Math.max(1e-6, dist);
+          const speed = Math.min(this.fuelSpeed, Math.max(this.fuelSpeed * 0.45, dist * 0.12));
+          scene.matter.body.setVelocity(fuel.body, {x: nx * speed, y: ny * speed});
+        }
+      }
+
+      forceRestoreRobotStartingFuel(scene) {
+        const owners = ["Blue", "Red"];
+        for (const owner of owners) {
+          const robot = (owner === "Blue") ? scene.blueRobot : scene.redRobot;
+          for (const fuel of scene.fuels) {
+            if (robot.state.fuelStore.length >= PRELOADED_FUEL) break;
+            if (!fuel.resetOrigin || fuel.resetOrigin.kind !== "robot" || fuel.resetOrigin.owner !== owner) continue;
+            if (!fuel.body) continue;
+            fuel.stash(owner);
+            robot.state.fuelStore.push(fuel);
+          }
+        }
       }
     }
 
@@ -1642,6 +2372,7 @@
         this.matchStartMs = Date.now();
         this.matchOver = false;
         this.victoryReveal = null;
+        this.resetAnimator = new ResetAnimationController();
 
         // Pause/run state
         this.isRunning = false;
@@ -1693,28 +2424,54 @@
         }
 
         // Panels
-        const panelH = 96;
         const panelY = uiTop;
-
-        this.redScoreText = this.add.text(RED_LINE_X, FIELD_H / 2, "0", {
-          fontFamily: "monospace",
-          fontSize: "32px",
-          fontStyle: "bold",
-          color: "#ffffff",
-        }).setOrigin(0.5, 0.5).setDepth(1001);
-
-        this.blueScoreText = this.add.text(BLUE_LINE_X, FIELD_H / 2, "0", {
-          fontFamily: "monospace",
-          fontSize: "32px",
-          fontStyle: "bold",
-          color: "#ffffff",
-        }).setOrigin(0.5, 0.5).setDepth(1001);
 
         // Timer box
         const timerBoxW = 144;
         const timerBoxH = 72;
         const timerX0 = (FIELD_W - timerBoxW) / 2;
         const timerY0 = panelY;
+
+        const scoreBoxW = 118;
+        const scoreBoxH = timerBoxH;
+        const scoreY = timerY0 + (timerBoxH / 2);
+        const leftScoreX = timerX0 - (scoreBoxW / 2) - 8;
+        const rightScoreX = timerX0 + timerBoxW + (scoreBoxW / 2) + 8;
+
+        this.redScoreBox = this.add.rectangle(leftScoreX, scoreY, scoreBoxW, scoreBoxH, 0xc92020, 1)
+          .setStrokeStyle(2, 0x7a1515, 1)
+          .setDepth(1000);
+        this.blueScoreBox = this.add.rectangle(rightScoreX, scoreY, scoreBoxW, scoreBoxH, 0x1f66c7, 1)
+          .setStrokeStyle(2, 0x123f7a, 1)
+          .setDepth(1000);
+
+        this.redScoreText = this.add.text(leftScoreX, timerY0 + 45, "0", {
+          fontFamily: "monospace",
+          fontSize: "42px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(1001);
+
+        this.blueScoreText = this.add.text(rightScoreX, timerY0 + 45, "0", {
+          fontFamily: "monospace",
+          fontSize: "42px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(1001);
+
+        this.redScoreLabel = this.add.text(leftScoreX, timerY0 + 12, "Red", {
+          fontFamily: "monospace",
+          fontSize: "18px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(1001);
+
+        this.blueScoreLabel = this.add.text(rightScoreX, timerY0 + 12, "Blue", {
+          fontFamily: "monospace",
+          fontSize: "18px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(1001);
 
         this.uiG.fillStyle(0xe7e7e7, 1);
         this.uiG.fillRoundedRect(timerX0, timerY0, timerBoxW, timerBoxH, 6);
@@ -1761,14 +2518,33 @@
           color: "#111111",
         }).setOrigin(0.5, 0.5).setDepth(1002);
 
-        // Start/Stop button
+        this.leftActiveArrow = this.add.graphics().setDepth(1002);
+        this.rightActiveArrow = this.add.graphics().setDepth(1002);
+        this.leftActiveArrowPos = {x: leftScoreX - (scoreBoxW / 2) - 28, y: scoreY};
+        this.rightActiveArrowPos = {x: rightScoreX + (scoreBoxW / 2) + 28, y: scoreY};
+
+        // Start/Stop + Reset buttons
         const btnY = uiBottom - 18;
-        this.toggleBtnBg = this.add.rectangle(FIELD_W / 2, btnY, 170, 32, 0x222222, 1)
+        const toggleBtnX = FIELD_W / 2 - 90;
+        const resetBtnX = FIELD_W / 2 + 90;
+        this.toggleBtnBg = this.add.rectangle(toggleBtnX, btnY, 150, 32, 0x222222, 1)
           .setStrokeStyle(2, 0x666666, 1)
           .setDepth(1000)
           .setInteractive({useHandCursor: true});
 
-        this.toggleBtnText = this.add.text(FIELD_W / 2, btnY, "Start", {
+        this.toggleBtnText = this.add.text(toggleBtnX, btnY, "Start", {
+          fontFamily: "monospace",
+          fontSize: "16px",
+          fontStyle: "bold",
+          color: "#ffffff",
+        }).setOrigin(0.5, 0.5).setDepth(1001);
+
+        this.resetBtnBg = this.add.rectangle(resetBtnX, btnY, 150, 32, 0x3a2020, 1)
+          .setStrokeStyle(2, 0x8a3f3f, 1)
+          .setDepth(1000)
+          .setInteractive({useHandCursor: true});
+
+        this.resetBtnText = this.add.text(resetBtnX, btnY, "Reset", {
           fontFamily: "monospace",
           fontSize: "16px",
           fontStyle: "bold",
@@ -1778,6 +2554,13 @@
         this.toggleBtnBg.on("pointerdown", () => this.toggleRun());
         this.toggleBtnText.setInteractive({useHandCursor: true});
         this.toggleBtnText.on("pointerdown", () => this.toggleRun());
+        this.resetBtnBg.on("pointerdown", () => {
+          if (!this.resetAnimator || !this.resetAnimator.isActive()) this.startResetAnimation();
+        });
+        this.resetBtnText.setInteractive({useHandCursor: true});
+        this.resetBtnText.on("pointerdown", () => {
+          if (!this.resetAnimator || !this.resetAnimator.isActive()) this.startResetAnimation();
+        });
 
         // Start paused
         this.pauseStartMs = Date.now();
@@ -1804,10 +2587,10 @@
         // Outer boundary walls
         const wallThickness = 24;
         const walls = [
-          this.matter.add.rectangle(FIELD_W / 2, -wallThickness / 2, FIELD_W, wallThickness, {isStatic: true}),
-          this.matter.add.rectangle(FIELD_W / 2, FIELD_H + wallThickness / 2, FIELD_W, wallThickness, {isStatic: true}),
-          this.matter.add.rectangle(-wallThickness / 2, FIELD_H / 2, wallThickness, FIELD_H, {isStatic: true}),
-          this.matter.add.rectangle(FIELD_W + wallThickness / 2, FIELD_H / 2, wallThickness, FIELD_H, {isStatic: true}),
+          this.matter.add.rectangle(FIELD_W / 2, -wallThickness / 2, FIELD_W, wallThickness, {isStatic: true, restitution: WALL_RESTITUTION}),
+          this.matter.add.rectangle(FIELD_W / 2, FIELD_H + wallThickness / 2, FIELD_W, wallThickness, {isStatic: true, restitution: WALL_RESTITUTION}),
+          this.matter.add.rectangle(-wallThickness / 2, FIELD_H / 2, wallThickness, FIELD_H, {isStatic: true, restitution: WALL_RESTITUTION}),
+          this.matter.add.rectangle(FIELD_W + wallThickness / 2, FIELD_H / 2, wallThickness, FIELD_H, {isStatic: true, restitution: WALL_RESTITUTION}),
         ];
         walls.forEach((w) => {
           w.collisionFilter.category = CAT_FIELD_WALLS;
@@ -1855,9 +2638,10 @@
         this.spawnFuelGrid();
         this.spawnFuelDepots();
 
-        // Controls (SWAPPED):
+        // Controls:
         // WASD/QE/Space = RED
         // IJKL/UO/Enter = BLUE
+        // X = Start/Stop, Z = Reset
         this.keys = {
           wasd: this.input.keyboard.addKeys("W,A,S,D,Q,E"),
           space: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
@@ -1865,7 +2649,8 @@
           ijkl: this.input.keyboard.addKeys("I,J,K,L,U,O"),
           enter: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER),
 
-          reset: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R),
+          toggle: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.X),
+          reset: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z),
         };
 
 
@@ -1908,6 +2693,8 @@
 
         // Preload fuel as real Fuel objects in master list, but stashed in robots
         this.preloadRobotFuel();
+        this.blueRobot.updateAimAndLabel(16.7);
+        this.redRobot.updateAimAndLabel(16.7);
         this.victoryReveal = new VictoryRevealController(this, {durationMs: 5000});
 
         // Collision scoring: hex sensors
@@ -1919,6 +2706,7 @@
           if (this.matchOver) return;
 
           const nowMs = Date.now();
+          const resetActive = !!(this.resetAnimator && this.resetAnimator.isActive());
 
           // Helper: intake sensor can be a part; the flag is usually on the part
           const isIntakeSensor = (body) => !!(body && (body.isIntakeSensor || body.parent?.isIntakeSensor));
@@ -1953,6 +2741,7 @@
             //    Only score/capture if airborne (wasShot)
             // ------------------------------------------------------------
             if (fuelBody.wasShot) {
+              if (resetActive) continue;
               let hub = null;
               let scoringRobot = null;
 
@@ -1992,14 +2781,18 @@
             const robotObj = robotForIntakeSensor(otherBody);
             if (!robotObj) continue;
 
-            if (robotObj.state.fuelStore.length >= MAX_STORAGE) continue;
-
             const fuelObj = fuelBody.fuelObj;
             if (!fuelObj) {
               // If something went weird, clean it up safely
               this.deleteFuelBody(fuelBody);
               continue;
             }
+
+            if (resetActive) {
+              if (!this.resetAnimator.canIntakeFuel(robotObj, fuelObj)) continue;
+            }
+
+            if (robotObj.state.fuelStore.length >= MAX_STORAGE) continue;
 
             // Tiny cooldown prevents double-grabs from multiple contact pairs
             if (fuelBody._noIntakeUntilMs && nowMs < fuelBody._noIntakeUntilMs) continue;
@@ -2092,8 +2885,8 @@
         };
 
         // Defaults
-        redSel.value = "human";
-        blueSel.value = "human";
+        redSel.value = "fuelSeeker";
+        blueSel.value = "adaptiveHub";
 
         // Wire events
         redSel.addEventListener("change", () => apply(this.redRobot, redSel, redHint));
@@ -2115,11 +2908,13 @@
 
         for (let i = 0; i < PRELOADED_FUEL; i++) {
           const fb = new Fuel(this);
+          fb.resetOrigin = {kind: "robot", owner: "Blue", slotIndex: i};
           fb.stash("Blue");
           this.fuels.push(fb);
           this.blueRobot.state.fuelStore.push(fb);
 
           const fr = new Fuel(this);
+          fr.resetOrigin = {kind: "robot", owner: "Red", slotIndex: i};
           fr.stash("Red");
           this.fuels.push(fr);
           this.redRobot.state.fuelStore.push(fr);
@@ -2168,6 +2963,7 @@
 
       toggleRun() {
         if (this.matchOver) return;
+        if (this.resetAnimator && this.resetAnimator.isActive()) return;
 
         const now = Date.now();
         if (this.isRunning) {
@@ -2218,22 +3014,70 @@
         }
 
         if (tf === "SHIFT1") {
-          if (this.autoLeader === "RED") return {red: true, blue: false};
-          if (this.autoLeader === "BLUE") return {red: false, blue: true};
+          if (this.autoLeader === "RED") return {red: false, blue: true};
+          if (this.autoLeader === "BLUE") return {red: true, blue: false};
           return {red: true, blue: true};
         }
 
         const shiftIndex = (tf === "SHIFT2") ? 0 : (tf === "SHIFT3") ? 1 : 2;
         let redActive;
         if (this.autoLeader === "RED") {
-          redActive = (shiftIndex % 2 === 1);
+          redActive = (shiftIndex % 2 === 0);
         } else if (this.autoLeader === "BLUE") {
-          redActive = (shiftIndex % 2 === 0);
+          redActive = (shiftIndex % 2 === 1);
         } else {
-          redActive = (shiftIndex % 2 === 0);
+          redActive = (shiftIndex % 2 === 1);
         }
 
         return {red: !!redActive, blue: !redActive};
+      }
+
+      drawHubActiveArrow(gfx, x, y, direction, isActive) {
+        if (!gfx) return;
+        gfx.clear();
+        if (!isActive) return;
+
+        const w = 42;
+        const h = 42;
+        gfx.fillStyle(0xf4dd08, 1);
+        gfx.lineStyle(2, 0x131313, 1);
+        gfx.fillRect(x - w / 2, y - h / 2, w, h);
+        gfx.strokeRect(x - w / 2, y - h / 2, w, h);
+
+        const shaftW = 14;
+        const shaftH = 5;
+        const headLen = 8;
+        const headHalfH = 8;
+        gfx.fillStyle(0x111111, 1);
+        if (direction === "left") {
+          const jointX = x - 4;
+          const tipX = jointX - headLen;
+          gfx.fillRect(jointX, y - (shaftH / 2), shaftW, shaftH);
+          gfx.fillTriangle(tipX, y, jointX, y - headHalfH, jointX, y + headHalfH);
+        } else {
+          const jointX = x + 4;
+          const tipX = jointX + headLen;
+          gfx.fillRect(jointX - shaftW, y - (shaftH / 2), shaftW, shaftH);
+          gfx.fillTriangle(tipX, y, jointX, y - headHalfH, jointX, y + headHalfH);
+        }
+      }
+
+      setHubActivityArrows(active) {
+        if (!this.leftActiveArrow || !this.rightActiveArrow) return;
+        this.drawHubActiveArrow(
+          this.leftActiveArrow,
+          this.leftActiveArrowPos.x,
+          this.leftActiveArrowPos.y,
+          "left",
+          !!active?.red
+        );
+        this.drawHubActiveArrow(
+          this.rightActiveArrow,
+          this.rightActiveArrowPos.x,
+          this.rightActiveArrowPos.y,
+          "right",
+          !!active?.blue
+        );
       }
 
       updateHubTransitionWarning(nowMs, elapsedS) {
@@ -2296,6 +3140,7 @@
         const active = this.getHubActivationForTimeframe(tf);
         this.redHub.setActive(active.red);
         this.blueHub.setActive(active.blue);
+        this.setHubActivityArrows(active);
 
         // Match sounds aligned to FRC-style transitions.
         if (prevName === "AUTO" && tf === "TRANSITION") {
@@ -2342,17 +3187,19 @@
             const y = this.gridStartY + r * FUEL_SPACING_Y + extraGapY + Phaser.Math.FloatBetween(-GRID_JITTER, GRID_JITTER);
 
             const f = new Fuel(this).spawnGround(x, y);
+            f.resetOrigin = {kind: "field", pos: {x, y}};
             this.fuels.push(f);
           }
         }
       }
 
-      spawnFuelDepot(startX, startY) {
+      spawnFuelDepot(startX, startY, owner) {
         for (let r = 0; r < DEPOT_ROWS; r++) {
           for (let c = 0; c < DEPOT_COLS; c++) {
             const x = startX + c * FUEL_SPACING_X;
             const y = startY + r * FUEL_SPACING_Y;
             const f = new Fuel(this).spawnGround(x, y);
+            f.resetOrigin = {kind: "depot", owner, pos: {x, y}};
             this.fuels.push(f);
           }
         }
@@ -2382,8 +3229,8 @@
         // Blue depot: along RIGHT back wall
         const blueStartX = (FIELD_W - DEPOT_INSET_X - FUEL_R) - depotW;
 
-        this.spawnFuelDepot(redStartX, redStartY);
-        this.spawnFuelDepot(blueStartX, blueStartY);
+        this.spawnFuelDepot(redStartX, redStartY, "Red");
+        this.spawnFuelDepot(blueStartX, blueStartY, "Blue");
 
         // Save depot centers for robot spawning
         this.redDepotCenter = {x: redStartX + depotW / 2, y: redStartY + depotH / 2};
@@ -2405,6 +3252,103 @@
         const angle = forwardAng - FORWARD_OFFSET; // convert forward angle to body.angle
 
         return {x, y, angle};
+      }
+
+      getRobotEjectWallPose(name) {
+        const start = this.getRobotStartPoseForAlliance(name);
+        const fuelCenter = this.getReturningFuelCentroidForAlliance(name);
+        const marginX = (ROBOT_W / 2) + 8;
+        const marginY = (ROBOT_H / 2) + 8;
+
+        const dLeft = start.x;
+        const dRight = FIELD_W - start.x;
+        const dTop = start.y;
+        const dBottom = FIELD_H - start.y;
+        const minD = Math.min(dLeft, dRight, dTop, dBottom);
+
+        let x = start.x;
+        let y = start.y;
+        if (minD === dLeft) {
+          x = marginX;
+          y = fuelCenter ? fuelCenter.y : start.y;
+        } else if (minD === dRight) {
+          x = FIELD_W - marginX;
+          y = fuelCenter ? fuelCenter.y : start.y;
+        } else if (minD === dTop) {
+          y = marginY;
+          x = fuelCenter ? fuelCenter.x : start.x;
+        } else {
+          y = FIELD_H - marginY;
+          x = fuelCenter ? fuelCenter.x : start.x;
+        }
+
+        x = Phaser.Math.Clamp(x, marginX, FIELD_W - marginX);
+        y = Phaser.Math.Clamp(y, marginY, FIELD_H - marginY);
+
+        const forwardAng = Math.atan2(start.y - y, start.x - x);
+        const angle = forwardAng - FORWARD_OFFSET;
+        return {x, y, angle};
+      }
+
+      getReturningFuelCentroidForAlliance(name) {
+        const targetZone = (name === "Red") ? ZoneId.RED : ZoneId.BLUE;
+        let sumX = 0;
+        let sumY = 0;
+        let n = 0;
+
+        for (const f of this.fuels) {
+          const origin = f?.resetOrigin;
+          if (!origin) continue;
+
+          const target = (origin.kind === "robot")
+            ? this.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
+            : origin.pos;
+          if (!target) continue;
+
+          if (this.getZoneForX(target.x).id !== targetZone) continue;
+          sumX += target.x;
+          sumY += target.y;
+          n += 1;
+        }
+
+        if (n <= 0) return null;
+        return {x: sumX / n, y: sumY / n};
+      }
+
+      getRobotFuelResetSlot(alliance, slotIndex) {
+        const pose = this.getRobotStartPoseForAlliance(alliance);
+        const forwardAng = pose.angle + FORWARD_OFFSET;
+        const fx = Math.cos(forwardAng);
+        const fy = Math.sin(forwardAng);
+        const lx = Math.cos(forwardAng + Math.PI / 2);
+        const ly = Math.sin(forwardAng + Math.PI / 2);
+
+        const cols = 4;
+        const row = Math.floor(slotIndex / cols);
+        const col = slotIndex % cols;
+        const lateral = (col - 1.5) * (FUEL_R * 3.0);
+        const forward = (ROBOT_H * 0.40) + (row * FUEL_R * 2.5);
+
+        const x = pose.x + (fx * forward) + (lx * lateral);
+        const y = pose.y + (fy * forward) + (ly * lateral);
+        return {
+          x: Phaser.Math.Clamp(x, FUEL_R + 2, FIELD_W - FUEL_R - 2),
+          y: Phaser.Math.Clamp(y, FUEL_R + 2, FIELD_H - FUEL_R - 2)
+        };
+      }
+
+      getRobotOnboardFuelTargetPoint(alliance) {
+        let sx = 0;
+        let sy = 0;
+        let n = 0;
+        for (let i = 0; i < PRELOADED_FUEL; i++) {
+          const p = this.getRobotFuelResetSlot(alliance, i);
+          sx += p.x;
+          sy += p.y;
+          n += 1;
+        }
+        if (n <= 0) return this.getAllianceDepotPoint(alliance);
+        return {x: sx / n, y: sy / n};
       }
 
       deleteFuelBody(fuelBody) {
@@ -2447,6 +3391,10 @@
           CAT_FIELD_WALLS: this.CAT_FIELD_WALLS,
           CAT_SENSOR: this.CAT_SENSOR
         });
+
+        if (this.resetAnimator && this.resetAnimator.isActive()) {
+          this.resetAnimator.applyResetFuelTint(fuel, fuel.resetOrigin);
+        }
       }
 
       // -----------------------------
@@ -2461,67 +3409,49 @@
       // -----------------------------
       // RESET
       // -----------------------------
-      resetMatch() {
-        // Destroy ALL fuels (world + stored)
-        for (const f of this.fuels) f.destroy();
-        this.fuels = [];
-
-        this.redHub.fuelStore = [];
-        this.blueHub.fuelStore = [];
-
-        this.matchStartMs = Date.now();
-        this.matchOver = false;
-
-        // Reset to PAUSED
-        this.isRunning = false;
-        this.hasMatchStarted = false;
-        this.pausedTotalMs = 0;
-        this.pauseStartMs = Date.now();
-        this.matter.world.pause();
-        if (this.toggleBtnText) this.toggleBtnText.setText("Start");
-
-        this.lastPlayedTimeframeName = null;
-        this.lastPlayedTransitionWarningFor = null;
-        this.hasPlayedMatchEndSound = false;
-        this.hasPlayedMatchResultSound = false;
-
-        // Reset timeframe state
-        this.currentTimeframeIndex = -1;
-        this.autoLeader = "TIE";
-        this.redHub.setActive(true);
-        this.blueHub.setActive(true);
-
-        // Respawn field fuel
-        this.spawnFuelGrid();
-        this.spawnFuelDepots();
-
-
-        // Reset robot states
-        this.blueRobot.state = new this.RobotState();
-        this.redRobot.state = new this.RobotState();
-
-        // Reset poses
-        this.blueRobot.setPose(this.getRobotStartPoseForAlliance("Blue"));
-        this.redRobot.setPose(this.getRobotStartPoseForAlliance("Red"));
-        if (this.victoryReveal) this.victoryReveal.reset();
-
-        // Preload fuel again as real objects in master list (stashed)
-        this.preloadRobotFuel();
-
-        // Reset timer UI
-        this.setTimeUI(MATCH_TIME_S);
-        this.applyTimeframeForElapsedS(0);
-        this.setTimeframeCountdownUI(this.getTimeframeRemainingS(0));
+      startResetAnimation() {
+        const now = Date.now();
+        this.resetAnimator.start(this, now);
       }
 
       update(time, delta) {
+        // Start/Stop (X)
+        if (Phaser.Input.Keyboard.JustDown(this.keys?.toggle)) {
+          this.toggleRun();
+        }
+
         // Reset
         if (Phaser.Input.Keyboard.JustDown(this.keys?.reset)) {
-          this.resetMatch();
+          if (!this.resetAnimator || !this.resetAnimator.isActive()) {
+            this.startResetAnimation();
+          }
+        }
+
+        const now = Date.now();
+        const resetActive = !!(this.resetAnimator && this.resetAnimator.isActive());
+
+        if (resetActive) {
+          this.resetAnimator.update(this, now, delta);
+          if (!this.resetAnimator.isActive()) {
+            return;
+          }
+          this.blueRobot.update(delta);
+          this.redRobot.update(delta);
+          for (const f of this.fuels) f.update(now);
+
+          const zoneCounts = this.computeZoneCountsIncludeStored();
+          if (this.zoneCountText) {
+            this.zoneCountText[ZoneId.RED].setText(`${zoneCounts[ZoneId.RED]}`);
+            this.zoneCountText[ZoneId.NEUTRAL].setText(`${zoneCounts[ZoneId.NEUTRAL]}`);
+            this.zoneCountText[ZoneId.BLUE].setText(`${zoneCounts[ZoneId.BLUE]}`);
+          }
+
+          if (this.redScoreText) this.redScoreText.setText(`${this.redRobot.state.score}`);
+          if (this.blueScoreText) this.blueScoreText.setText(`${this.blueRobot.state.score}`);
+          return;
         }
 
         // Timer based on active time
-        const now = Date.now();
         const activeElapsedS = this.getActiveElapsedMs(now) / 1000.0;
         const remaining = Math.max(0, MATCH_TIME_S - activeElapsedS);
 
@@ -2555,6 +3485,8 @@
 
         // If stopped, do not advance physics-driven updates
         if (!this.isRunning) {
+          this.blueRobot.updateAimAndLabel(delta);
+          this.redRobot.updateAimAndLabel(delta);
           const zoneCounts = this.computeZoneCountsIncludeStored();
           if (this.zoneCountText) {
             this.zoneCountText[ZoneId.RED].setText(`${zoneCounts[ZoneId.RED]}`);
@@ -2606,7 +3538,7 @@
         this.HUDtext.setText(
           `FuelTotal:${this.fuels.length}  World:${worldCount}  ` +
           `Stored(B:${storedBlue} R:${storedRed}) Hub(B:${storedHubBlue} R:${storedHubRed}) (sleep:${sleeping})  Inv:${invText}\n` +
-          `RED: WASD/QE + Space   BLUE: IJKL/UO + Enter   Reset: R`
+          `RED: WASD/QE + Space   BLUE: IJKL/UO + Enter   Start/Stop: X   Reset: Z`
         );
         */
       } // end of update()
