@@ -913,6 +913,15 @@
         this.robotAvoidHard = Math.hypot(ROBOT_W / 2, ROBOT_H / 2) + FUEL_R + 7;
         this.robotAvoidSoft = this.robotAvoidHard + 22;
         this.fuelNeighborDist = FUEL_R * 3.4;
+        this.flockNeighborDist = FUEL_R * 7.6;
+        this.flockSeparationDist = FUEL_R * 3.0;
+        this.flowNoiseSpatial = 0.0105;
+        this.flowNoiseTemporal = 0.00105;
+        this.flowMax = this.fuelSpeed * 0.42;
+        this.murmurationLegMaxMs = 2100;
+        this.murmurationLaneArriveDist = this.fuelArriveDist * 1.8;
+        this.murmurationTopLaneY = FIELD_H * 0.16;
+        this.murmurationBottomLaneY = FIELD_H * 0.84;
 
         this.hubEjectDone = false;
         this.fuelReturnDone = false;
@@ -926,10 +935,10 @@
         this.lightRedReturnColor = 0xff8f8f;
         this.lightBlueReturnColor = 0x89d8ff;
         this.driftStartDist = this.fuelArriveDist * 2.0;
-        this.allianceReturnHeadStartMs = 2000;
+        this.allianceReturnHeadStartMs = 5000;
 
         this.maxEjectWallMs = 5000;
-        this.maxFuelReturnMs = 8000;
+        this.maxFuelReturnMs = 12000;
         this.maxEmptyRobotsMs = 3500;
         this.maxRobotReturnMs = 5000;
         this.maxReloadMs = 4500;
@@ -1239,6 +1248,9 @@
         const frameScale = Phaser.Math.Clamp((deltaMs || 16.7) / 16.7, 0.55, 2.0);
         const accelPerFrame = this.fuelSpeed * 0.16;
         const nearDist = this.fuelArriveDist * 3.0;
+        const phaseMs = Math.max(1, this.maxFuelReturnMs);
+        const phaseT = Phaser.Math.Clamp((nowMs - this.phaseStartMs) / phaseMs, 0, 1);
+        const flockWeights = this.getFlockBlendWeights(phaseT);
         let settledCount = 0;
         for (let i = 0; i < movingFuel.length; i++) {
           const f = movingFuel[i];
@@ -1250,7 +1262,7 @@
             continue;
           }
 
-          const target = origin.kind === "robot"
+          const finalTarget = origin.kind === "robot"
             ? scene.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
             : origin.pos;
           this.applyResetFuelTint(f, origin);
@@ -1263,15 +1275,32 @@
             continue;
           }
 
-          const steer = this.getFuelSteering(scene, movingFuel, i, target.x, target.y);
+          let steerTarget = finalTarget;
+          let onFinalLeg = true;
+          if (meta.laneWaypoint && !meta.returnToOriginStarted) {
+            onFinalLeg = false;
+            steerTarget = meta.laneWaypoint;
+            const legElapsedMs = Math.max(0, nowMs - meta.startAtMs);
+            const laneDx = steerTarget.x - body.position.x;
+            const laneDy = steerTarget.y - body.position.y;
+            const laneDist = Math.hypot(laneDx, laneDy);
+            if (laneDist <= this.murmurationLaneArriveDist || legElapsedMs >= this.murmurationLegMaxMs) {
+              meta.returnToOriginStarted = true;
+              onFinalLeg = true;
+              steerTarget = finalTarget;
+              this.fuelProgress.set(f, {bestDist: Infinity, stallMs: 0, jitterMs: 0, jx: 0, jy: 0});
+            }
+          }
+
+          const steer = this.getFuelSteering(scene, movingFuel, i, steerTarget.x, steerTarget.y, nowMs, flockWeights);
           const prev = this.fuelMotion.get(f) || {vx: 0, vy: 0};
           const prog = this.fuelProgress.get(f) || {bestDist: Infinity, stallMs: 0, jitterMs: 0, jx: 0, jy: 0};
 
           if (!steer.arrived && steer.dist > this.driftStartDist) {
             const tMs = Math.max(0, nowMs - meta.startAtMs);
             const driftWave = Math.sin((tMs * meta.driftOmega) + meta.driftPhase);
-            const dx = target.x - body.position.x;
-            const dy = target.y - body.position.y;
+            const dx = steerTarget.x - body.position.x;
+            const dy = steerTarget.y - body.position.y;
             const dMag = Math.hypot(dx, dy);
             const nx = dx / Math.max(1e-6, dMag);
             const ny = dy / Math.max(1e-6, dMag);
@@ -1345,8 +1374,14 @@
           this.fuelMotion.set(f, {vx, vy});
 
           if (steer.arrived) {
+            if (!onFinalLeg) {
+              meta.returnToOriginStarted = true;
+              this.fuelMotion.set(f, {vx: 0, vy: 0});
+              this.fuelProgress.set(f, {bestDist: Infinity, stallMs: 0, jitterMs: 0, jx: 0, jy: 0});
+              continue;
+            }
             settledCount++;
-            scene.matter.body.setPosition(body, {x: target.x, y: target.y});
+            scene.matter.body.setPosition(body, {x: finalTarget.x, y: finalTarget.y});
             scene.matter.body.setVelocity(body, {x: 0, y: 0});
             this.fuelMotion.set(f, {vx: 0, vy: 0});
             this.fuelProgress.set(f, {bestDist: 0, stallMs: 0, jitterMs: 0, jx: 0, jy: 0});
@@ -1386,7 +1421,7 @@
         }
       }
 
-      getFuelSteering(scene, movingFuel, selfIndex, tx, ty) {
+      getFuelSteering(scene, movingFuel, selfIndex, tx, ty, nowMs, flockWeights) {
         const f = movingFuel[selfIndex];
         const body = f.body;
         const x = body.position.x;
@@ -1401,9 +1436,78 @@
         const nx = dx / Math.max(1e-6, dist);
         const ny = dy / Math.max(1e-6, dist);
         const speedByDist = Phaser.Math.Clamp(dist / 34, 0.22, 1.0);
-        let vx = nx * this.fuelSpeed * speedByDist;
-        let vy = ny * this.fuelSpeed * speedByDist;
+        let homeVx = nx * this.fuelSpeed * speedByDist;
+        let homeVy = ny * this.fuelSpeed * speedByDist;
+        const prev = this.fuelMotion.get(f) || {vx: 0, vy: 0};
+        let sepX = 0;
+        let sepY = 0;
+        let aliX = 0;
+        let aliY = 0;
+        let cohCx = 0;
+        let cohCy = 0;
+        let neighbors = 0;
         const side = (selfIndex % 2 === 0) ? 1 : -1;
+
+        for (let j = 0; j < movingFuel.length; j++) {
+          if (j === selfIndex) continue;
+          const otherFuel = movingFuel[j];
+          const other = otherFuel.body;
+          const ax = x - other.position.x;
+          const ay = y - other.position.y;
+          const d = Math.hypot(ax, ay);
+          if (d <= 1e-6 || d >= this.flockNeighborDist) continue;
+
+          neighbors++;
+          cohCx += other.position.x;
+          cohCy += other.position.y;
+          const otherVel = this.fuelMotion.get(otherFuel) || {vx: 0, vy: 0};
+          aliX += otherVel.vx;
+          aliY += otherVel.vy;
+
+          if (d < this.flockSeparationDist) {
+            const ux = ax / d;
+            const uy = ay / d;
+            const t = Phaser.Math.Clamp((this.flockSeparationDist - d) / this.flockSeparationDist, 0, 1);
+            sepX += ux * t;
+            sepY += uy * t;
+          }
+        }
+
+        let flockVx = 0;
+        let flockVy = 0;
+        if (neighbors > 0) {
+          const invN = 1 / neighbors;
+          const avgAliX = aliX * invN;
+          const avgAliY = aliY * invN;
+          const centerX = cohCx * invN;
+          const centerY = cohCy * invN;
+
+          const cohDx = centerX - x;
+          const cohDy = centerY - y;
+          const cohMag = Math.hypot(cohDx, cohDy);
+          const cohNx = cohDx / Math.max(1e-6, cohMag);
+          const cohNy = cohDy / Math.max(1e-6, cohMag);
+          const sepMag = Math.hypot(sepX, sepY);
+          const sepNx = sepX / Math.max(1e-6, sepMag);
+          const sepNy = sepY / Math.max(1e-6, sepMag);
+
+          const aliDx = avgAliX - prev.vx;
+          const aliDy = avgAliY - prev.vy;
+          const aliMag = Math.hypot(aliDx, aliDy);
+          const aliNx = aliDx / Math.max(1e-6, aliMag);
+          const aliNy = aliDy / Math.max(1e-6, aliMag);
+
+          flockVx += sepNx * this.fuelSpeed * 1.15;
+          flockVy += sepNy * this.fuelSpeed * 1.15;
+          flockVx += aliNx * this.fuelSpeed * 0.92;
+          flockVy += aliNy * this.fuelSpeed * 0.92;
+          flockVx += cohNx * this.fuelSpeed * 0.72;
+          flockVy += cohNy * this.fuelSpeed * 0.72;
+        }
+
+        const flow = this.getFuelFlowVector(x, y, ty, nowMs);
+        let vx = (homeVx * flockWeights.home) + (flockVx * flockWeights.flock) + (flow.vx * flockWeights.flow);
+        let vy = (homeVy * flockWeights.home) + (flockVy * flockWeights.flock) + (flow.vy * flockWeights.flow);
 
         const hubs = [scene.redHub.center, scene.blueHub.center];
         for (const hub of hubs) {
@@ -1465,6 +1569,29 @@
         return {vx, vy, arrived: false, dist};
       }
 
+      getFlockBlendWeights(t) {
+        if (t < 0.35) {
+          return {home: 0.25, flock: 1.0, flow: 0.35};
+        }
+        if (t < 0.75) {
+          return {home: 0.8, flock: 0.62, flow: 0.2};
+        }
+        return {home: 1.4, flock: 0.2, flow: 0.05};
+      }
+
+      getFuelFlowVector(x, y, targetY, nowMs) {
+        const t = nowMs || 0;
+        const n1 = Math.sin((x * this.flowNoiseSpatial) + (t * this.flowNoiseTemporal));
+        const n2 = Math.sin((y * this.flowNoiseSpatial * 1.27) + (t * this.flowNoiseTemporal * 0.87) + 1.9);
+        const n3 = Math.sin(((x + y) * this.flowNoiseSpatial * 0.73) + (t * this.flowNoiseTemporal * 1.16) + 3.2);
+        const nx = (n1 * 0.62) + (n3 * 0.38);
+        const ny = (n2 * 0.58) - (n3 * 0.42);
+        const laneBias = Phaser.Math.Clamp((targetY - y) / Math.max(1, FIELD_H * 0.45), -1, 1);
+        const vx = nx * this.flowMax * 0.9;
+        const vy = (ny + (laneBias * 0.25)) * this.flowMax;
+        return {vx, vy};
+      }
+
       initializeFuelReturnMeta(scene, nowMs) {
         this.fuelReturnMeta = new WeakMap();
         for (const f of scene.fuels) {
@@ -1490,12 +1617,26 @@
         const extraDelayMs = (targetZone === ZoneId.RED || targetZone === ZoneId.BLUE)
           ? 0
           : this.allianceReturnHeadStartMs;
+        const needsLaneMurmuration = (targetZone === ZoneId.NEUTRAL);
+        let laneWaypoint = null;
+        if (needsLaneMurmuration && target) {
+          const laneIsTop = target.y < (FIELD_H * 0.5);
+          const laneYBase = laneIsTop ? this.murmurationTopLaneY : this.murmurationBottomLaneY;
+          const ySpread = ((((hash * 3) % 101) / 100) - 0.5) * (FIELD_H * 0.10);
+          const xSpread = ((((hash * 7) % 121) / 120) - 0.5) * (FIELD_W * 0.22);
+          laneWaypoint = {
+            x: Phaser.Math.Clamp(target.x + xSpread, FUEL_R + 6, FIELD_W - FUEL_R - 6),
+            y: Phaser.Math.Clamp(laneYBase + ySpread, FUEL_R + 8, FIELD_H - FUEL_R - 8)
+          };
+        }
 
         meta = {
           startAtMs: nowMs + delayMs + extraDelayMs,
           driftPhase: ((hash % 360) * Math.PI) / 180,
           driftOmega: 0.004 + ((hash % 7) * 0.00045),
-          driftAmp: this.fuelSpeed * (0.08 + ((hash % 5) * 0.02))
+          driftAmp: this.fuelSpeed * (0.08 + ((hash % 5) * 0.02)),
+          laneWaypoint,
+          returnToOriginStarted: !laneWaypoint
         };
         this.fuelReturnMeta.set(fuel, meta);
         return meta;
