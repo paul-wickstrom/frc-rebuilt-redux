@@ -918,10 +918,14 @@
         this.flowNoiseSpatial = 0.0105;
         this.flowNoiseTemporal = 0.00105;
         this.flowMax = this.fuelSpeed * 0.42;
-        this.murmurationLegMaxMs = 2100;
-        this.murmurationLaneArriveDist = this.fuelArriveDist * 1.8;
-        this.murmurationTopLaneY = FIELD_H * 0.16;
-        this.murmurationBottomLaneY = FIELD_H * 0.84;
+        this.murmurationLegMaxMs = 3500;
+        this.murmurationLaneArriveDist = this.fuelArriveDist * 1.35;
+        this.murmurationWaypointHoldMs = 400;
+        this.murmurationWallInset = FUEL_R + 8;
+        this.murmurationAnchorSpreadX = FIELD_W * 0.03;
+        this.murmurationAnchorSpreadY = FIELD_H * 0.04;
+        this.crossClassSeparationScale = 0.26;
+        this.allianceHeadStartHomeBoost = 1.5;
 
         this.hubEjectDone = false;
         this.fuelReturnDone = false;
@@ -935,7 +939,7 @@
         this.lightRedReturnColor = 0xff8f8f;
         this.lightBlueReturnColor = 0x89d8ff;
         this.driftStartDist = this.fuelArriveDist * 2.0;
-        this.allianceReturnHeadStartMs = 5000;
+        this.allianceReturnHeadStartMs = 1000;
 
         this.maxEjectWallMs = 5000;
         this.maxFuelReturnMs = 12000;
@@ -1284,7 +1288,11 @@
             const laneDx = steerTarget.x - body.position.x;
             const laneDy = steerTarget.y - body.position.y;
             const laneDist = Math.hypot(laneDx, laneDy);
-            if (laneDist <= this.murmurationLaneArriveDist || legElapsedMs >= this.murmurationLegMaxMs) {
+            if (laneDist <= this.murmurationLaneArriveDist && !meta.waypointReachedAtMs) {
+              meta.waypointReachedAtMs = nowMs;
+            }
+            const holdDone = meta.waypointReachedAtMs && ((nowMs - meta.waypointReachedAtMs) >= this.murmurationWaypointHoldMs);
+            if (holdDone || legElapsedMs >= this.murmurationLegMaxMs) {
               meta.returnToOriginStarted = true;
               onFinalLeg = true;
               steerTarget = finalTarget;
@@ -1292,7 +1300,18 @@
             }
           }
 
-          const steer = this.getFuelSteering(scene, movingFuel, i, steerTarget.x, steerTarget.y, nowMs, flockWeights);
+          const activeWeights = (!onFinalLeg)
+            ? {
+              home: flockWeights.home * 1.45,
+              flock: flockWeights.flock,
+              flow: flockWeights.flow * 0.55
+            }
+            : flockWeights;
+          if (meta.fuelClass === "alliance" && (nowMs - this.phaseStartMs) < this.allianceReturnHeadStartMs) {
+            activeWeights.home *= this.allianceHeadStartHomeBoost;
+            activeWeights.flow *= 0.7;
+          }
+          const steer = this.getFuelSteering(scene, movingFuel, i, steerTarget.x, steerTarget.y, nowMs, activeWeights);
           const prev = this.fuelMotion.get(f) || {vx: 0, vy: 0};
           const prog = this.fuelProgress.get(f) || {bestDist: Infinity, stallMs: 0, jitterMs: 0, jx: 0, jy: 0};
 
@@ -1424,6 +1443,7 @@
       getFuelSteering(scene, movingFuel, selfIndex, tx, ty, nowMs, flockWeights) {
         const f = movingFuel[selfIndex];
         const body = f.body;
+        const selfMeta = this.getFuelReturnMeta(scene, f, nowMs);
         const x = body.position.x;
         const y = body.position.y;
         const dx = tx - x;
@@ -1452,24 +1472,32 @@
           if (j === selfIndex) continue;
           const otherFuel = movingFuel[j];
           const other = otherFuel.body;
+          const otherMeta = this.getFuelReturnMeta(scene, otherFuel, nowMs);
+          const sameFuelClass = (
+            selfMeta?.fuelClass === otherMeta?.fuelClass &&
+            (selfMeta?.fuelClass !== "neutral" || selfMeta?.cohortKey === otherMeta?.cohortKey)
+          );
           const ax = x - other.position.x;
           const ay = y - other.position.y;
           const d = Math.hypot(ax, ay);
           if (d <= 1e-6 || d >= this.flockNeighborDist) continue;
 
-          neighbors++;
-          cohCx += other.position.x;
-          cohCy += other.position.y;
-          const otherVel = this.fuelMotion.get(otherFuel) || {vx: 0, vy: 0};
-          aliX += otherVel.vx;
-          aliY += otherVel.vy;
+          if (sameFuelClass) {
+            neighbors++;
+            cohCx += other.position.x;
+            cohCy += other.position.y;
+            const otherVel = this.fuelMotion.get(otherFuel) || {vx: 0, vy: 0};
+            aliX += otherVel.vx;
+            aliY += otherVel.vy;
+          }
 
           if (d < this.flockSeparationDist) {
             const ux = ax / d;
             const uy = ay / d;
             const t = Phaser.Math.Clamp((this.flockSeparationDist - d) / this.flockSeparationDist, 0, 1);
-            sepX += ux * t;
-            sepY += uy * t;
+            const sepScale = sameFuelClass ? 1.0 : this.crossClassSeparationScale;
+            sepX += ux * t * sepScale;
+            sepY += uy * t * sepScale;
           }
         }
 
@@ -1614,19 +1642,24 @@
           ? scene.getRobotFuelResetSlot(origin.owner, origin.slotIndex || 0)
           : origin.pos;
         const targetZone = target ? scene.getZoneForX(target.x).id : ZoneId.NEUTRAL;
+        const fuelClass = (targetZone === ZoneId.NEUTRAL) ? "neutral" : "alliance";
         const extraDelayMs = (targetZone === ZoneId.RED || targetZone === ZoneId.BLUE)
           ? 0
           : this.allianceReturnHeadStartMs;
         const needsLaneMurmuration = (targetZone === ZoneId.NEUTRAL);
         let laneWaypoint = null;
+        let cohortKey = null;
         if (needsLaneMurmuration && target) {
-          const laneIsTop = target.y < (FIELD_H * 0.5);
-          const laneYBase = laneIsTop ? this.murmurationTopLaneY : this.murmurationBottomLaneY;
-          const ySpread = ((((hash * 3) % 101) / 100) - 0.5) * (FIELD_H * 0.10);
-          const xSpread = ((((hash * 7) % 121) / 120) - 0.5) * (FIELD_W * 0.22);
+          const isLeftQuadrant = target.x < (FIELD_W * 0.5);
+          const isTopQuadrant = target.y < (FIELD_H * 0.5);
+          cohortKey = `${isTopQuadrant ? "T" : "B"}${isLeftQuadrant ? "L" : "R"}`;
+          const anchorX = isLeftQuadrant ? RED_LINE_X : BLUE_LINE_X;
+          const anchorY = isTopQuadrant ? this.murmurationWallInset : (FIELD_H - this.murmurationWallInset);
+          const ySpread = ((((hash * 3) % 101) / 100) - 0.5) * this.murmurationAnchorSpreadY;
+          const xSpread = ((((hash * 7) % 121) / 120) - 0.5) * this.murmurationAnchorSpreadX;
           laneWaypoint = {
-            x: Phaser.Math.Clamp(target.x + xSpread, FUEL_R + 6, FIELD_W - FUEL_R - 6),
-            y: Phaser.Math.Clamp(laneYBase + ySpread, FUEL_R + 8, FIELD_H - FUEL_R - 8)
+            x: Phaser.Math.Clamp(anchorX + xSpread, FUEL_R + 6, FIELD_W - FUEL_R - 6),
+            y: Phaser.Math.Clamp(anchorY + ySpread, FUEL_R + 8, FIELD_H - FUEL_R - 8)
           };
         }
 
@@ -1635,8 +1668,11 @@
           driftPhase: ((hash % 360) * Math.PI) / 180,
           driftOmega: 0.004 + ((hash % 7) * 0.00045),
           driftAmp: this.fuelSpeed * (0.08 + ((hash % 5) * 0.02)),
+          fuelClass,
+          cohortKey,
           laneWaypoint,
-          returnToOriginStarted: !laneWaypoint
+          returnToOriginStarted: !laneWaypoint,
+          waypointReachedAtMs: null
         };
         this.fuelReturnMeta.set(fuel, meta);
         return meta;
